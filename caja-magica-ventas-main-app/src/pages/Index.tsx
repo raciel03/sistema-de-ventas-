@@ -21,7 +21,7 @@ import { createUserProfile, getUserProfile, getUserByEmail, updateUserProfile, d
 import type { UserProfile } from "@/firebase/userService";
 import { getAllProducts, createProduct, updateProduct, deleteProduct, replaceAllProducts, subscribeProducts } from "@/firebase/productService";
 import { getAllSales, createSale, updateSale, deleteSale, replaceAllSales, subscribeSales } from "@/firebase/saleService";
-import { getAllStockHistory, createStockHistoryItem, updateStockHistoryItem, replaceAllStockHistory, subscribeStockHistory, deleteStockHistoryItem } from "@/firebase/stockHistoryService";
+import { getAllStockHistory, createStockHistoryItem, updateStockHistoryItem, replaceAllStockHistory, subscribeStockHistory, deleteStockHistoryItem, getStockHistoryByProduct } from "@/firebase/stockHistoryService";
 import { getAllDailyCloses, createDailyClose, updateDailyClose, deleteDailyClose, replaceAllDailyCloses, subscribeDailyCloses } from "@/firebase/dailyCloseService";
 import { getAllLocalUsers, createLocalUser, updateLocalUser, deleteLocalUser, replaceAllLocalUsers, subscribeLocalUsers } from "@/firebase/localUserService";
 import { 
@@ -340,6 +340,11 @@ const Index = () => {
   const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
   const [restockQuantities, setRestockQuantities] = useState<{ [key: string]: string }>({});
   const [stockHistory, setStockHistory] = useState<StockHistoryItem[]>([]);
+  // Recuerdan qué IDs de ventas/historial YA están confirmados en Firestore,
+  // para no reescribir todo el array completo en cada sync.
+  const syncedSaleIds = useRef<Set<string>>(new Set());
+  const syncedHistoryIds = useRef<Set<string>>(new Set());
+  const [modalProductHistory, setModalProductHistory] = useState<StockHistoryItem[]>([]);
   const [isStockHistoryModalOpen, setIsStockHistoryModalOpen] = useState(false);
   const [selectedStockHistoryProduct, setSelectedStockHistoryProduct] = useState<Product | null>(null);
   const [isDeleteStockHistoryOpen, setIsDeleteStockHistoryOpen] = useState(false);
@@ -630,15 +635,10 @@ const Index = () => {
   }, []);
   const syncSalesToFirestore = useCallback(async (data: any[]) => {
     try {
-      const current = await getAllSales();
-      const curMap = new Map(current.map(s => [s.id, s]));
-      const newMap = new Map(data.map(s => [s.id, s]));
-      for (const [id, s] of newMap) {
-        const existing = curMap.get(id);
-        if (!existing) { await createSale(id, stripUndefined(s)); }
-        else { await updateSale(id, stripUndefined(s)); }
-      }
-      for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteSale(id); } catch {} } }
+      const pending = data.filter(s => !syncedSaleIds.current.has(s.id));
+      if (pending.length === 0) return;
+      await Promise.all(pending.map(s => createSale(s.id, stripUndefined(s))));
+      pending.forEach(s => syncedSaleIds.current.add(s.id));
     } catch (e) { console.error('ERROR syncSales:', e); }
   }, []);
   const syncClosesToFirestore = useCallback(async (data: any[]) => {
@@ -656,14 +656,10 @@ const Index = () => {
   }, []);
   const syncHistoryToFirestore = useCallback(async (data: any[]) => {
     try {
-      const current = await getAllStockHistory();
-      const curMap = new Map(current.map(h => [h.id, h]));
-      const newMap = new Map(data.map(h => [h.id, h]));
-      for (const [id, h] of newMap) {
-        if (!curMap.has(id)) { await createStockHistoryItem(id, stripUndefined(h)); }
-        else { await updateStockHistoryItem(id, stripUndefined(h)); }
-      }
-      for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteStockHistoryItem(id); } catch {} } }
+      const pending = data.filter(h => !syncedHistoryIds.current.has(h.id));
+      if (pending.length === 0) return;
+      await Promise.all(pending.map(h => createStockHistoryItem(h.id, stripUndefined(h))));
+      pending.forEach(h => syncedHistoryIds.current.add(h.id));
     } catch (e) { console.error('ERROR syncHistory:', e); }
   }, []);
   const syncUsersToFirestore = useCallback(async (data: any[]) => {
@@ -750,7 +746,7 @@ const Index = () => {
           getAllStockHistory().catch(() => null as any),
         ]);
         if (fbProducts) {
-          const local: Product[] = []; try { const s = localStorage.getItem('pos-products'); if (s) local.push(...JSON.parse(s)); } catch {}
+          let local: Product[] = []; try { const s = localStorage.getItem('pos-products'); if (s) local.push(...JSON.parse(s)); } catch {}
           for (const item of fbProducts) { if (!local.find(x => x.id === item.id)) local.push(item); }
           local = local.filter(item => isPendingId(PENDING.PRODUCTS, item.id) || fbProducts.find(x => x.id === item.id));
           const fixedProducts = local.map(p => ({
@@ -764,30 +760,32 @@ const Index = () => {
           setProducts(fixedProducts); try { localStorage.setItem('pos-products', JSON.stringify(fixedProducts)); } catch {}
         }
         if (fbSales) {
-          const local: Sale[] = []; try { const s = localStorage.getItem('pos-sales'); if (s) local.push(...JSON.parse(s)); } catch {}
+          let local: Sale[] = []; try { const s = localStorage.getItem('pos-sales'); if (s) local.push(...JSON.parse(s)); } catch {}
           for (const item of fbSales) {
             if (!item.localDate) { try { (item as any).localDate = getLocalDateStr(new Date(item.date)); } catch {} }
             if (!local.find(x => x.id === item.id)) local.push(item);
           }
           local = local.filter(item => isPendingId(PENDING.SALES, item.id) || fbSales.find(x => x.id === item.id));
+          fbSales.forEach(item => syncedSaleIds.current.add(item.id));
           setSales(local); try { localStorage.setItem('pos-sales', JSON.stringify(local)); } catch {}
         }
         if (fbUsers) {
-          const local: AppUser[] = []; try { const s = localStorage.getItem('pos-users'); if (s) local.push(...JSON.parse(s)); } catch {}
+          let local: AppUser[] = []; try { const s = localStorage.getItem('pos-users'); if (s) local.push(...JSON.parse(s)); } catch {}
           for (const item of fbUsers) { if (!local.find(x => x.id === item.id)) local.push(item); }
           local = local.filter(item => isPendingId(PENDING.USERS, item.id) || fbUsers.find(x => x.id === item.id));
           setUsers(local); try { localStorage.setItem('pos-users', JSON.stringify(local)); } catch {}
         }
         if (fbCloses) {
-          const local: DailyClose[] = []; try { const s = localStorage.getItem('pos-daily-closes'); if (s) local.push(...JSON.parse(s)); } catch {}
+          let local: DailyClose[] = []; try { const s = localStorage.getItem('pos-daily-closes'); if (s) local.push(...JSON.parse(s)); } catch {}
           for (const item of fbCloses) { if (!local.find(x => x.id === item.id)) local.push(item); }
           local = local.filter(item => isPendingId(PENDING.CLOSES, item.id) || fbCloses.find(x => x.id === item.id));
           setDailyCloses(local); try { localStorage.setItem('pos-daily-closes', JSON.stringify(local)); } catch {}
         }
         if (fbHistory) {
-          const local: StockHistoryItem[] = []; try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
+          let local: StockHistoryItem[] = []; try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
           for (const item of fbHistory) { if (!local.find(x => x.id === item.id)) local.push(item); }
           local = local.filter(item => isPendingId(PENDING.HISTORY, item.id) || fbHistory.find(x => x.id === item.id));
+          fbHistory.forEach(item => syncedHistoryIds.current.add(item.id));
           setStockHistory(local); try { localStorage.setItem('pos-stock-history', JSON.stringify(local)); } catch {}
         }
       } catch {}
@@ -833,6 +831,7 @@ const Index = () => {
       const local: Sale[] = [];
       try { const s = localStorage.getItem('pos-sales'); if (s) local.push(...JSON.parse(s)); } catch {}
       for (const s of fb) { if (!s.localDate) { try { (s as any).localDate = getLocalDateStr(new Date(s.date)); } catch {} } }
+      fb.forEach(item => syncedSaleIds.current.add(item.id));
       let merged: Sale[] = [...local];
       for (const item of fb) {
         const idx = merged.findIndex(x => x.id === item.id);
@@ -905,6 +904,7 @@ const Index = () => {
     const subMergeHistory = (fb: StockHistoryItem[]) => {
       const local: StockHistoryItem[] = [];
       try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
+      fb.forEach(item => syncedHistoryIds.current.add(item.id));
       let merged: StockHistoryItem[] = [...local];
       for (const item of fb) {
         const idx = merged.findIndex(x => x.id === item.id);
@@ -1121,6 +1121,20 @@ const Index = () => {
     if (!selectedStockHistoryProduct) return null;
     return products.find(product => product.id === selectedStockHistoryProduct.id) ?? selectedStockHistoryProduct;
   }, [products, selectedStockHistoryProduct]);
+
+  useEffect(() => {
+    const activeProductId = currentStockHistoryProduct?.id || viewingMayoristaProduct?.id;
+    if (!activeProductId) {
+      setModalProductHistory([]);
+      return;
+    }
+    getStockHistoryByProduct(activeProductId)
+      .then(setModalProductHistory)
+      .catch((err) => {
+        console.error('Error cargando historial del producto:', err);
+        setModalProductHistory([]);
+      });
+  }, [currentStockHistoryProduct, viewingMayoristaProduct]);
 
   const productStockHistoryEntries = useMemo(() => {
     if (!currentStockHistoryProduct) return [];
@@ -1677,6 +1691,7 @@ const Index = () => {
           if (!item.localDate) { try { (item as any).localDate = getLocalDateStr(new Date(item.date)); } catch {} }
           if (!local.find(x => x.id === item.id)) local.push(item);
         }
+        fbSales.forEach(item => syncedSaleIds.current.add(item.id));
         setSales(local); try { localStorage.setItem('pos-sales', JSON.stringify(local)); } catch {}
       }
       if (fbUsers) {
@@ -1692,6 +1707,7 @@ const Index = () => {
       if (fbHistory) {
         const local: StockHistoryItem[] = []; try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
         for (const item of fbHistory) { if (!local.find(x => x.id === item.id)) local.push(item); }
+        fbHistory.forEach(item => syncedHistoryIds.current.add(item.id));
         setStockHistory(local); try { localStorage.setItem('pos-stock-history', JSON.stringify(local)); } catch {}
       }
       toast({ title: "Sincronización completa", description: "Datos actualizados desde Firebase" });
@@ -5936,7 +5952,7 @@ const Index = () => {
                                 onClick={() => setResumenTab('regular')}
                                 className={`h-8 rounded-md text-xs font-bold uppercase tracking-widest ${activeTab === 'regular' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                               >
-                                Productos / Peso
+                                Unidad / Peso
                               </Button>
                               <Button
                                 variant="ghost"
@@ -7342,7 +7358,7 @@ const Index = () => {
                             <SelectValue placeholder="Elige un nivel..." />
                           </SelectTrigger>
                           <SelectContent>
-                            {['Unidad', 'Paquete', 'Ciento', 'Millar', 'Plancha', 'Fardo', 'Personalizado'].filter(n => !editMayoristaLevels.find(l => l.name === n)).map(n => (
+                            {['Unidad', 'Paquete', 'Ciento', 'Millar', 'Plancha', 'Fardo', 'Personalizado'].filter(n => !editMayoristaLevels.find(l => l.name === n) && (n !== 'Unidad' || editingMayoristaProduct?.type !== 'mayorista')).map(n => (
                               <SelectItem key={n} value={n}>{n}</SelectItem>
                             ))}
                           </SelectContent>
@@ -7949,7 +7965,7 @@ const Index = () => {
                 {/* Row 3: VENTAS POR RESTOK (only for hasUnidad) */}
                 {userRole === 'admin' && hasUnidad && (() => {
                   const productId = viewingMayoristaProduct.id;
-                  const productHistory = stockHistory.filter(h => h.productId === productId);
+                  const productHistory = modalProductHistory;
                   const boundaryEvents = productHistory.filter(h => h.type === 'restock' || h.type === 'initial')
                     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
                   const productSales = productHistory.filter(h => h.type === 'sale' && h.affectedLevelName)
@@ -9277,13 +9293,13 @@ const Index = () => {
                           </TableHeader>
                           <TableBody>
                             {(() => {
-                              const productHistory = stockHistory.filter(item => item.productId === currentStockHistoryProduct.id)
+                              const productHistory = modalProductHistory
                                 .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
                               if (!selectedHistoryLevel) {
                                 // Vista "Todos" (formato general) - agrupar ventas entre restocks
                                 const filteredHistory = productHistory.filter(item =>
-                                  item.type !== 'sale' || item.isSummary
+                                  (item.type !== 'sale' || item.isSummary) && item.type !== 'price_change'
                                 );
 
                                 if (filteredHistory.length === 0) {

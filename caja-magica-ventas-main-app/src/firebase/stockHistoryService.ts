@@ -1,4 +1,4 @@
-import { collection, getDocs, setDoc, updateDoc, deleteDoc, doc, writeBatch, onSnapshot, QuerySnapshot, DocumentData } from 'firebase/firestore';
+import { collection, getDocs, setDoc, updateDoc, deleteDoc, doc, writeBatch, onSnapshot, query, where, orderBy, limit, startAfter, QueryDocumentSnapshot, QuerySnapshot, DocumentData } from 'firebase/firestore';
 import { db } from './config';
 
 export interface StockHistoryItem {
@@ -24,6 +24,30 @@ const COLLECTION = 'stock-history';
 export const getAllStockHistory = async (): Promise<StockHistoryItem[]> => {
   const snap = await getDocs(collection(db, COLLECTION));
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as StockHistoryItem));
+};
+
+export const getStockHistoryByProduct = async (productId: string): Promise<StockHistoryItem[]> => {
+  const q = query(
+    collection(db, COLLECTION),
+    where('productId', '==', productId),
+    orderBy('date', 'desc')
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as StockHistoryItem));
+};
+
+export const getRecentStockHistory = async (
+  pageSize: number = 50,
+  cursor?: QueryDocumentSnapshot<DocumentData>
+): Promise<{ items: StockHistoryItem[]; lastDoc: QueryDocumentSnapshot<DocumentData> | null }> => {
+  const base = [collection(db, COLLECTION), orderBy('date', 'desc'), limit(pageSize)] as const;
+  const q = cursor
+    ? query(base[0], base[1], startAfter(cursor), base[2])
+    : query(base[0], base[1], base[2]);
+  const snap = await getDocs(q);
+  const items = snap.docs.map(d => ({ id: d.id, ...d.data() } as StockHistoryItem));
+  const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+  return { items, lastDoc };
 };
 
 export const createStockHistoryItem = async (id: string, data: StockHistoryItem) => {

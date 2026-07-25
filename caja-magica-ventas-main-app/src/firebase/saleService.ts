@@ -1,4 +1,4 @@
-import { collection, getDocs, setDoc, updateDoc, deleteDoc, doc, writeBatch, onSnapshot, QuerySnapshot, DocumentData } from 'firebase/firestore';
+import { collection, getDocs, getDoc, setDoc, updateDoc, deleteDoc, doc, writeBatch, onSnapshot, query, orderBy, limit, startAfter, QueryDocumentSnapshot, QuerySnapshot, DocumentData } from 'firebase/firestore';
 import { db } from './config';
 import type { Product } from './productService';
 
@@ -31,10 +31,23 @@ export const getAllSales = async (): Promise<Sale[]> => {
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Sale));
 };
 
+export const getRecentSales = async (
+  pageSize: number = 50,
+  cursor?: QueryDocumentSnapshot<DocumentData>
+): Promise<{ items: Sale[]; lastDoc: QueryDocumentSnapshot<DocumentData> | null }> => {
+  const q = cursor
+    ? query(collection(db, COLLECTION), orderBy('date', 'desc'), startAfter(cursor), limit(pageSize))
+    : query(collection(db, COLLECTION), orderBy('date', 'desc'), limit(pageSize));
+  const snap = await getDocs(q);
+  const items = snap.docs.map(d => ({ id: d.id, ...d.data() } as Sale));
+  const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+  return { items, lastDoc };
+};
+
 export const getSaleById = async (id: string): Promise<Sale | null> => {
-  const snap = await getDocs(collection(db, COLLECTION));
-  const docSnap = snap.docs.find(d => d.id === id);
-  return docSnap ? ({ id: docSnap.id, ...docSnap.data() } as Sale) : null;
+  const docRef = doc(db, COLLECTION, id);
+  const docSnap = await getDoc(docRef);
+  return docSnap.exists() ? ({ id: docSnap.id, ...docSnap.data() } as Sale) : null;
 };
 
 export const createSale = async (id: string, data: Sale) => {

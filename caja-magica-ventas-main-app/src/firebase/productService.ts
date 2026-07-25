@@ -1,4 +1,4 @@
-import { collection, getDocs, setDoc, updateDoc, deleteDoc, doc, writeBatch, onSnapshot, QuerySnapshot, DocumentData } from 'firebase/firestore';
+import { collection, getDocs, getDoc, setDoc, updateDoc, deleteDoc, doc, writeBatch, onSnapshot, QuerySnapshot, DocumentData } from 'firebase/firestore';
 import { db } from './config';
 
 export interface SaleLevel {
@@ -39,9 +39,9 @@ export const getAllProducts = async (): Promise<Product[]> => {
 };
 
 export const getProductById = async (id: string): Promise<Product | null> => {
-  const snap = await getDocs(collection(db, COLLECTION));
-  const doc = snap.docs.find(d => d.id === id);
-  return doc ? ({ id: doc.id, ...doc.data() } as Product) : null;
+  const docRef = doc(db, COLLECTION, id);
+  const docSnap = await getDoc(docRef);
+  return docSnap.exists() ? ({ id: docSnap.id, ...docSnap.data() } as Product) : null;
 };
 
 export const createProduct = async (id: string, data: Product) => {
