@@ -340,10 +340,7 @@ const Index = () => {
   const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
   const [restockQuantities, setRestockQuantities] = useState<{ [key: string]: string }>({});
   const [stockHistory, setStockHistory] = useState<StockHistoryItem[]>([]);
-  // Recuerdan qué IDs de ventas/historial YA están confirmados en Firestore,
-  // para no reescribir todo el array completo en cada sync.
-  const syncedSaleIds = useRef<Set<string>>(new Set());
-  const syncedHistoryIds = useRef<Set<string>>(new Set());
+  // Ya no se necesita seguimiento de IDs sincronizados — cada sync escribe todo via setDoc (upsert)
   const [modalProductHistory, setModalProductHistory] = useState<StockHistoryItem[]>([]);
   const [isStockHistoryModalOpen, setIsStockHistoryModalOpen] = useState(false);
   const [selectedStockHistoryProduct, setSelectedStockHistoryProduct] = useState<Product | null>(null);
@@ -621,8 +618,20 @@ const Index = () => {
     try { await updateProduct(id, stripUndefined(data)); } catch (e) { console.error('ERROR updateProductFB:', e); }
   }, []);
   const syncProductsToFirestore = useCallback(async (data: Product[]) => {
+    if (data.length === 0) { console.warn('ABORT syncProducts: data vacío, no se borrará Firebase'); return; }
+    const corregirTipo = (p: Product) => {
+      if (p.saleLevels?.length && p.type !== 'mayorista') {
+        return { ...p, type: 'mayorista' as const, stock: 0 };
+      }
+      return p;
+    };
+    data = data.map(corregirTipo);
     try {
-      const current = await getAllProducts();
+      const current = (await getAllProducts()).map(corregirTipo);
+      if (current.length > 0 && data.length < 5 && current.length > 50) {
+        console.warn('ABORT syncProducts: sospechoso (local='+data.length+' vs firebase='+current.length+')');
+        return;
+      }
       const curMap = new Map(current.map(p => [p.id, p]));
       const newMap = new Map(data.map(p => [p.id, p]));
       for (const [id, p] of newMap) {
@@ -635,10 +644,15 @@ const Index = () => {
   }, []);
   const syncSalesToFirestore = useCallback(async (data: any[]) => {
     try {
-      const pending = data.filter(s => !syncedSaleIds.current.has(s.id));
-      if (pending.length === 0) return;
-      await Promise.all(pending.map(s => createSale(s.id, stripUndefined(s))));
-      pending.forEach(s => syncedSaleIds.current.add(s.id));
+      const current = await getAllSales();
+      const curMap = new Map(current.map(s => [s.id, s]));
+      const newMap = new Map(data.map(s => [s.id, s]));
+      for (const [id, s] of newMap) {
+        const existing = curMap.get(id);
+        if (!existing) { await createSale(id, stripUndefined(s)); }
+        else if (JSON.stringify(existing) !== JSON.stringify(s)) { await updateSale(id, stripUndefined(s)); }
+      }
+      for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteSale(id); } catch {} } }
     } catch (e) { console.error('ERROR syncSales:', e); }
   }, []);
   const syncClosesToFirestore = useCallback(async (data: any[]) => {
@@ -656,10 +670,13 @@ const Index = () => {
   }, []);
   const syncHistoryToFirestore = useCallback(async (data: any[]) => {
     try {
-      const pending = data.filter(h => !syncedHistoryIds.current.has(h.id));
-      if (pending.length === 0) return;
-      await Promise.all(pending.map(h => createStockHistoryItem(h.id, stripUndefined(h))));
-      pending.forEach(h => syncedHistoryIds.current.add(h.id));
+      const current = await getAllStockHistory();
+      const curMap = new Map(current.map(h => [h.id, h]));
+      for (const h of data) {
+        const existing = curMap.get(h.id);
+        if (!existing) { await createStockHistoryItem(h.id, stripUndefined(h)); }
+        else if (JSON.stringify(existing) !== JSON.stringify(h)) { await updateStockHistoryItem(h.id, stripUndefined(h)); }
+      }
     } catch (e) { console.error('ERROR syncHistory:', e); }
   }, []);
   const syncUsersToFirestore = useCallback(async (data: any[]) => {
@@ -766,7 +783,6 @@ const Index = () => {
             if (!local.find(x => x.id === item.id)) local.push(item);
           }
           local = local.filter(item => isPendingId(PENDING.SALES, item.id) || fbSales.find(x => x.id === item.id));
-          fbSales.forEach(item => syncedSaleIds.current.add(item.id));
           setSales(local); try { localStorage.setItem('pos-sales', JSON.stringify(local)); } catch {}
         }
         if (fbUsers) {
@@ -785,7 +801,6 @@ const Index = () => {
           let local: StockHistoryItem[] = []; try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
           for (const item of fbHistory) { if (!local.find(x => x.id === item.id)) local.push(item); }
           local = local.filter(item => isPendingId(PENDING.HISTORY, item.id) || fbHistory.find(x => x.id === item.id));
-          fbHistory.forEach(item => syncedHistoryIds.current.add(item.id));
           setStockHistory(local); try { localStorage.setItem('pos-stock-history', JSON.stringify(local)); } catch {}
         }
       } catch {}
@@ -815,7 +830,7 @@ const Index = () => {
           createProduct(item.id, stripUndefined(item)).then(() => removePendingId(PENDING.PRODUCTS, item.id)).catch(e => { console.error('ERROR subMerge createProduct:', e); });
         }
       }
-      merged = merged.filter(item => isPendingId(PENDING.PRODUCTS, item.id) || fb.find(x => x.id === item.id));
+      merged = merged.filter(item => isPendingId(PENDING.PRODUCTS, item.id) || fb.find(x => x.id === item.id) || local.find(x => x.id === item.id));
       const fixedProds = merged.map(p => ({
         ...p,
         initialStock: (p.initialStock ?? 0) < p.stock ? p.stock : p.initialStock,
@@ -831,7 +846,6 @@ const Index = () => {
       const local: Sale[] = [];
       try { const s = localStorage.getItem('pos-sales'); if (s) local.push(...JSON.parse(s)); } catch {}
       for (const s of fb) { if (!s.localDate) { try { (s as any).localDate = getLocalDateStr(new Date(s.date)); } catch {} } }
-      fb.forEach(item => syncedSaleIds.current.add(item.id));
       let merged: Sale[] = [...local];
       for (const item of fb) {
         const idx = merged.findIndex(x => x.id === item.id);
@@ -904,7 +918,6 @@ const Index = () => {
     const subMergeHistory = (fb: StockHistoryItem[]) => {
       const local: StockHistoryItem[] = [];
       try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
-      fb.forEach(item => syncedHistoryIds.current.add(item.id));
       let merged: StockHistoryItem[] = [...local];
       for (const item of fb) {
         const idx = merged.findIndex(x => x.id === item.id);
@@ -1232,7 +1245,7 @@ const Index = () => {
         let unitsInMin = 0;
 
         if (p.type === 'mayorista' && p.saleLevels?.length) {
-          const sortedLevels = [...p.saleLevels].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained);
+          const sortedLevels = [...p.saleLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; });
           const minLevel = sortedLevels[0];
           if (restockAmount < minLevel.baseUnitsContained) {
             toast({
@@ -1343,7 +1356,7 @@ const Index = () => {
     const isFirstEntry = !lastBaseEntry;
     const updatedProducts = products.map(product => {
       if (product.id !== currentStockHistoryProduct.id) return product;
-      const hasUnidadLevel = product.saleLevels?.some(l => l.name === 'Unidad') && product.type !== 'mayorista';
+      const hasUnidadLevel = product.saleLevels?.some(l => l.name === 'Unidad');
       const isLevelBased = product.type === 'mayorista' || (product.type === 'unidad' && product.saleLevels?.length);
       return {
         ...product,
@@ -1351,7 +1364,7 @@ const Index = () => {
         initialStock: product.stock + restockAmount,
         saleLevels: isLevelBased
           ? product.saleLevels?.map(l =>
-              l.name === 'Unidad' || product.type === 'mayorista'
+              l.name === 'Unidad' || (product.type === 'mayorista' && !hasUnidadLevel)
                 ? { ...l, stock: l.stock + restockAmount, initialStock: l.stock + restockAmount }
                 : l)
           : product.saleLevels
@@ -1442,17 +1455,20 @@ const Index = () => {
 
     const product = selectedMayoristaProduct;
     const qty = typeof mayoristaQuantity === 'number' ? mayoristaQuantity : (parseInt(mayoristaQuantity) || 1);
-    const isUnidadBased = product.saleLevels?.some(l => l.name === 'Unidad') && product.type !== 'mayorista';
+    const isUnidadBased = product.saleLevels?.some(l => l.name === 'Unidad');
+    const stockBase = isUnidadBased
+      ? (product.saleLevels?.find(l => l.name === 'Unidad')?.stock ?? 0)
+      : product.stock;
 
     const maxAvailable = isUnidadBased
-      ? Math.floor(product.stock / level.baseUnitsContained)
+      ? Math.floor(stockBase / level.baseUnitsContained)
       : level.stock;
 
     if (qty < 1 || qty > maxAvailable) {
       toast({
         title: "Stock insuficiente",
         description: isUnidadBased
-          ? `Stock disponible: ${product.stock} unid. (máx ${maxAvailable} ${level.name}(s))`
+          ? `Stock disponible: ${stockBase} unid. (máx ${maxAvailable} ${level.name}(s))`
           : `Solo hay ${level.stock} ${level.name}(s) disponibles`,
         variant: "destructive"
       });
@@ -1467,14 +1483,14 @@ const Index = () => {
       const levelName = existingItem.selectedLevelName!;
       const currentLevel = product.saleLevels?.find(l => l.name === levelName);
       const maxLevels = currentLevel
-        ? (isUnidadBased ? Math.floor(product.stock / currentLevel.baseUnitsContained) : currentLevel.stock)
+        ? (isUnidadBased ? Math.floor(stockBase / currentLevel.baseUnitsContained) : currentLevel.stock)
         : 0;
       const newQty = existingItem.quantity + qty;
       if (newQty > maxLevels) {
         toast({
           title: "Stock insuficiente",
           description: isUnidadBased
-            ? `Stock disponible: ${product.stock} unid. (máx ${maxLevels} ${level.name}(s))`
+            ? `Stock disponible: ${stockBase} unid. (máx ${maxLevels} ${level.name}(s))`
             : `Solo hay ${maxLevels} ${level.name}(s) disponibles`,
           variant: "destructive"
         });
@@ -1691,7 +1707,6 @@ const Index = () => {
           if (!item.localDate) { try { (item as any).localDate = getLocalDateStr(new Date(item.date)); } catch {} }
           if (!local.find(x => x.id === item.id)) local.push(item);
         }
-        fbSales.forEach(item => syncedSaleIds.current.add(item.id));
         setSales(local); try { localStorage.setItem('pos-sales', JSON.stringify(local)); } catch {}
       }
       if (fbUsers) {
@@ -1707,7 +1722,6 @@ const Index = () => {
       if (fbHistory) {
         const local: StockHistoryItem[] = []; try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
         for (const item of fbHistory) { if (!local.find(x => x.id === item.id)) local.push(item); }
-        fbHistory.forEach(item => syncedHistoryIds.current.add(item.id));
         setStockHistory(local); try { localStorage.setItem('pos-stock-history', JSON.stringify(local)); } catch {}
       }
       toast({ title: "Sincronización completa", description: "Datos actualizados desde Firebase" });
@@ -1722,7 +1736,10 @@ const Index = () => {
   };
 
   const agregarProductoVenta = (product: Product) => {
-    if (product.stock <= 0) {
+    const stockValido = product.type === 'mayorista' && product.saleLevels?.some(l => l.name === 'Unidad')
+      ? (product.saleLevels.find(l => l.name === 'Unidad')?.stock ?? 0)
+      : product.stock;
+    if (stockValido <= 0) {
       toast({
         title: "Sin stock",
         description: "Este producto no tiene stock disponible",
@@ -1850,9 +1867,10 @@ const Index = () => {
     return currentSale.reduce((total, item) => {
       if (item.product.type === 'peso') {
         return total + ((item.product.salePricePerKg || 0) * (item.quantity / 1000));
-      } else {
-        return total + ((item.product.salePrice || 0) * item.quantity);
       }
+      const level = item.selectedLevelName ? item.product.saleLevels?.find(l => l.name === item.selectedLevelName) : undefined;
+      const price = level?.salePrice ?? item.product.salePrice ?? 0;
+      return total + (price * item.quantity);
     }, 0);
   };
 
@@ -1917,7 +1935,10 @@ const Index = () => {
         const profitPerKg = (item.product.salePricePerKg || 0) - (item.product.purchasePricePerKg || 0);
         return total + (profitPerKg * totalKg);
       }
-      return total + (((item.product.salePrice || 0) - (item.product.purchasePrice || 0)) * item.quantity);
+      const level = item.selectedLevelName ? item.product.saleLevels?.find(l => l.name === item.selectedLevelName) : undefined;
+      const salePrice = level?.salePrice ?? item.product.salePrice ?? 0;
+      const purchasePrice = level?.purchasePrice ?? item.product.purchasePrice ?? 0;
+      return total + ((salePrice - purchasePrice) * item.quantity);
     }, 0);
     
     if (paymentMethod === 'efectivo') {
@@ -1945,7 +1966,7 @@ const Index = () => {
       const saleItems = currentSale.filter(item => item.product.id === product.id);
       if (saleItems.length === 0) return product;
 
-      const hasUnidadLevel = product.saleLevels?.some(l => l.name === 'Unidad') && product.type !== 'mayorista';
+      const hasUnidadLevel = product.saleLevels?.some(l => l.name === 'Unidad');
 
       if (hasUnidadLevel) {
         const totalUnits = saleItems.reduce((sum, item) => {
@@ -2498,7 +2519,7 @@ const Index = () => {
     setEditingMayoristaProduct(product);
     setEditMayoristaName(product.name);
     setEditMayoristaCategory(product.category);
-    setEditMayoristaLevels(product.saleLevels ? [...product.saleLevels].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained) : []);
+    setEditMayoristaLevels(product.saleLevels ? [...product.saleLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }) : []);
     setEditLevelDropdown('Paquete');
     setEditLevelContains('');
     setEditLevelPurchasePrice('');
@@ -2571,7 +2592,7 @@ const Index = () => {
       }
     }
 
-    const sortedLevels = [...editMayoristaLevels].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained);
+    const sortedLevels = [...editMayoristaLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; });
     const hasUnidad = sortedLevels.some(l => l.name === 'Unidad');
     let totalUnits: number;
     if (hasUnidad) {
@@ -2594,7 +2615,7 @@ const Index = () => {
         stock: totalUnits,
         initialStock: totalUnits,
         imageUrl,
-        type: hasUnidad ? 'unidad' : 'mayorista'
+        type: 'mayorista'
       } : p
     );
     setProducts(updatedProducts);
@@ -3052,7 +3073,7 @@ const Index = () => {
       }
     }
 
-    const sortedLevels = [...newMayoristaLevels].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained);
+    const sortedLevels = [...newMayoristaLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; });
     const hasUnidad = sortedLevels.some(l => l.name === 'Unidad');
     let totalUnits: number;
     let initialTotalUnits: number;
@@ -3061,11 +3082,11 @@ const Index = () => {
       const unidadLevel = sortedLevels.find(l => l.name === 'Unidad')!;
       totalUnits = sortedLevels.reduce((sum, l) => sum + l.stock * l.baseUnitsContained, 0);
       initialTotalUnits = sortedLevels.reduce((sum, l) => sum + l.initialStock * l.baseUnitsContained, 0);
-      productType = 'unidad';
     } else {
       totalUnits = sortedLevels.reduce((sum, l) => sum + l.stock * l.baseUnitsContained, 0);
       initialTotalUnits = sortedLevels.reduce((sum, l) => sum + l.initialStock * l.baseUnitsContained, 0);
     }
+    productType = 'mayorista';
     const minLevel = sortedLevels.find(l => l.name === 'Unidad') || sortedLevels[0];
 
     const productToAdd: Product = {
@@ -3686,13 +3707,12 @@ const Index = () => {
   const filteredProducts = products.filter(product => {
     const matchesSearch = normalizeText(product.name).includes(normalizeText(searchTerm)) ||
       normalizeText(product.category).includes(normalizeText(searchTerm));
-    if (ventaMode === 'mayor') return matchesSearch && (product.type === 'mayorista' || (product.type === 'unidad' && product.saleLevels && product.saleLevels.length > 0));
-    return matchesSearch && product.type !== 'mayorista';
+    if (ventaMode === 'mayor') return matchesSearch && product.saleLevels?.length;
+    return matchesSearch && !product.saleLevels?.length;
   });
 
   const filteredInventory = products.filter(product => {
-    if (product.type === 'mayorista') return false;
-    if (product.type === 'unidad' && product.saleLevels && product.saleLevels.length > 0) return false;
+    if (product.saleLevels?.length) return false;
     const matchesSearch = normalizeText(product.name).includes(normalizeText(inventorySearch)) ||
                          normalizeText(product.category).includes(normalizeText(inventorySearch));
     
@@ -3704,7 +3724,7 @@ const Index = () => {
   });
 
   const filteredMayoristaProducts = products.filter(product =>
-    (product.type === 'mayorista' || (product.type === 'unidad' && product.saleLevels && product.saleLevels.length > 0)) &&
+    product.saleLevels?.length > 0 &&
     (normalizeText(product.name).includes(normalizeText(mayoristaSearch)) ||
      normalizeText(product.category).includes(normalizeText(mayoristaSearch)))
   );
@@ -3733,8 +3753,7 @@ const Index = () => {
     if (product.type === 'peso') {
       const purchasePrice = product.purchasePrice ?? product.purchasePricePerKg ?? 0;
       return purchasePrice * (product.stock / 1000);
-    } else if (product.type === 'mayorista') {
-      if (!product.saleLevels?.length) return 0;
+    } else if (product.saleLevels?.length) {
       return product.saleLevels.reduce((total, level) => total + (level.stock * level.purchasePrice), 0);
     } else {
       return product.purchasePrice * product.stock;
@@ -3745,8 +3764,7 @@ const Index = () => {
     if (product.type === 'peso') {
       const salePrice = product.salePrice ?? product.salePricePerKg ?? 0;
       return salePrice * (product.stock / 1000);
-    } else if (product.type === 'mayorista') {
-      if (!product.saleLevels?.length) return 0;
+    } else if (product.saleLevels?.length) {
       return product.saleLevels.reduce((total, level) => total + (level.stock * level.salePrice), 0);
     } else {
       return product.salePrice * product.stock;
@@ -3759,7 +3777,7 @@ const Index = () => {
       const salePrice = product.salePrice ?? product.salePricePerKg ?? 0;
       const profitPerKg = salePrice - purchasePrice;
       return profitPerKg * (product.stock / 1000);
-    } else if (product.type === 'mayorista') {
+    } else if (product.saleLevels?.length) {
       if (!product.saleLevels?.length) return 0;
       return product.saleLevels.reduce((total, level) => total + (level.stock * (level.salePrice - level.purchasePrice)), 0);
     } else {
@@ -3768,23 +3786,26 @@ const Index = () => {
   };
 
   const inventoryTotals = {
-    // Valor total de compra: suma de (precio de compra × stock actual) para todos los productos
-    totalPurchaseValue: products.reduce((total, product) => total + calculateProductPurchaseValue(product), 0),
-    
-    // Valor total de venta: suma de (precio de venta × stock actual) para todos los productos
-    totalSaleValue: products.reduce((total, product) => total + calculateProductSaleValue(product), 0),
-    
-    // Ganancia potencial: suma de ((precio venta - precio compra) × stock actual) para todos los productos
-    potentialProfit: products.reduce((total, product) => total + calculateProductPotentialProfit(product), 0)
+    totalPurchaseValue: products
+      .filter(p => !p.saleLevels?.length)
+      .reduce((total, product) => total + calculateProductPurchaseValue(product), 0),
+
+    totalSaleValue: products
+      .filter(p => !p.saleLevels?.length)
+      .reduce((total, product) => total + calculateProductSaleValue(product), 0),
+
+    potentialProfit: products
+      .filter(p => !p.saleLevels?.length)
+      .reduce((total, product) => total + calculateProductPotentialProfit(product), 0)
   };
 
   const inventoryStats = {
-    totalProducts: products.filter(p => p.type !== 'mayorista').length,
+    totalProducts: products.filter(p => !p.saleLevels?.length).length,
     unitProducts: products.filter(p => p.type === 'unidad').length,
     weightProducts: products.filter(p => p.type === 'peso').length,
-    outOfStock: products.filter(p => p.type !== 'mayorista' && p.stock === 0).length,
-    lowStock: products.filter(p => p.type !== 'mayorista' && p.stock > 0 && (p.type === 'peso' ? p.stock <= 500 : p.stock <= 20)).length,
-    totalStockValue: products.filter(p => p.type !== 'mayorista').reduce((total, product) => {
+    outOfStock: products.filter(p => !p.saleLevels?.length && p.stock === 0).length,
+    lowStock: products.filter(p => !p.saleLevels?.length && p.stock > 0 && (p.type === 'peso' ? p.stock <= 500 : p.stock <= 20)).length,
+    totalStockValue: products.filter(p => !p.saleLevels?.length).reduce((total, product) => {
       if (product.type === 'peso') {
         const salePrice = product.salePrice ?? product.salePricePerKg ?? 0;
         return total + (salePrice * (product.stock / 1000));
@@ -3831,7 +3852,7 @@ const Index = () => {
 
   const STOCK_BAJO_THRESHOLD = 5;
 
-  const mayProdFilter = (p: Product) => p.type === 'mayorista' || (p.type === 'unidad' && p.saleLevels && p.saleLevels.length > 0);
+  const mayProdFilter = (p: Product) => p.saleLevels?.length > 0;
 
   const stockCriticoList = products
     .filter(mayProdFilter)
@@ -4216,10 +4237,10 @@ const Index = () => {
                                     {product.category}
                                   </Badge>
                                   <Badge 
-                                    variant={product.stock > 0 ? "secondary" : "destructive"}
-                                    className={`text-[9px] sm:text-[10px] px-1.5 py-0 font-bold ${(() => { const threshold = product.type === 'peso' ? 500 : 20; return product.stock > 0 && product.stock <= threshold ? 'bg-amber-100 text-amber-700 border-amber-200' : product.stock > threshold ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : ''; })()}`}
+                                    variant={(() => { const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs > 0 ? "secondary" : "destructive"; })()}
+                                    className={`text-[9px] sm:text-[10px] px-1.5 py-0 font-bold ${(() => { const threshold = product.type === 'peso' ? 500 : 20; const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs > 0 && rs <= threshold ? 'bg-amber-100 text-amber-700 border-amber-200' : rs > threshold ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : ''; })()}`}
                                   >
-                                    {product.type === 'peso' ? `${(product.stock / 1000).toFixed(1)}kg` : `Stock: ${product.stock}`}
+                                    {(() => { if (product.type === 'peso') return (product.stock / 1000).toFixed(1) + 'kg'; const total = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return 'Stock: ' + total; })()}
                                   </Badge>
                                 </div>
 
@@ -4568,11 +4589,11 @@ const Index = () => {
                                     {product.type === 'peso' ? formatWeight(product.stock) : `${product.stock}`}
                                   </TableCell>
                                   <TableCell className="text-right">
-                                    {product.stock === 0 ? (
+                                    {(() => { const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? (
                                       <Badge variant="destructive">AGOTADO</Badge>
                                     ) : (
                                       <Badge variant="secondary" className="bg-amber-100 text-amber-800">BAJO</Badge>
-                                    )}
+                                    ); })()}
                                   </TableCell>
                                 </TableRow>
                               ))}
@@ -4703,8 +4724,8 @@ const Index = () => {
                             <TableCell className="border-r">
                               <Badge
                                 variant="secondary"
-                                className={`text-[10px] ${(() => { const threshold = product.type === 'peso' ? 500 : 20; return product.stock === 0 ? 'bg-red-100 text-red-700' : product.stock <= threshold ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'; })()}`}>
-                                {product.stock === 0 ? 'Agotado' : (() => { const t = product.type === 'peso' ? 500 : 20; return product.stock <= t ? 'Bajo' : 'OK'; })()}
+                                className={`text-[10px] ${(() => { const threshold = product.type === 'peso' ? 500 : 20; const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? 'bg-red-100 text-red-700' : rs <= threshold ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'; })()}`}>
+                                {(() => { const threshold = product.type === 'peso' ? 500 : 20; const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? 'Agotado' : rs <= threshold ? 'Bajo' : 'OK'; })()}
                               </Badge>
                             </TableCell>
                             {userRole === 'admin' && (
@@ -4732,7 +4753,7 @@ const Index = () => {
                                   onClick={() => {
                                     setSelectedStockHistoryProduct(product);
                                     if (product.type === 'mayorista' && product.saleLevels && product.saleLevels.length > 0) {
-                                      const sortedLevels = [...product.saleLevels].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained);
+                                      const sortedLevels = [...product.saleLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; });
                                       setSelectedHistoryLevel(sortedLevels[0].name);
                                     } else {
                                       setSelectedHistoryLevel('');
@@ -4885,7 +4906,7 @@ const Index = () => {
                       </TableHeader>
                       <TableBody>
                         {filteredMayoristaProducts.map((product) => {
-                          const sortedLevels = [...(product.saleLevels || [])].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained);
+                          const sortedLevels = [...(product.saleLevels || [])].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; });
                           const minLevel = sortedLevels[0];
                           
                           return (
@@ -4908,7 +4929,7 @@ const Index = () => {
                             <TableCell className="border-r">
                               <div className="flex flex-wrap gap-1">
                                 {product.saleLevels?.map((level, i) => {
-                                  const isUnidadBased = product.saleLevels?.some(l => l.name === 'Unidad') && product.type !== 'mayorista';
+                                  const isUnidadBased = product.saleLevels?.some(l => l.name === 'Unidad');
                                   const levelStock = isUnidadBased && level.name !== 'Unidad'
                                     ? Math.floor(product.stock / level.baseUnitsContained)
                                     : level.stock;
@@ -4939,8 +4960,8 @@ const Index = () => {
                             <TableCell className="border-r text-center">
                               <Badge
                                 variant="secondary"
-                                className={`text-[10px] ${product.stock === 0 ? 'bg-red-100 text-red-700' : product.stock <= 20 ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>
-                                {product.stock === 0 ? 'Agotado' : product.stock <= 20 ? 'Bajo' : 'OK'}
+                                className={`text-[10px] ${(() => { const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? 'bg-red-100 text-red-700' : rs <= 20 ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'; })()}`}>
+                                {(() => { const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? 'Agotado' : rs <= 20 ? 'Bajo' : 'OK'; })()}
                               </Badge>
                             </TableCell>
                             <TableCell className="text-right">
@@ -4953,7 +4974,7 @@ const Index = () => {
                                     <Button size="icon" variant="ghost" className="h-8 w-8 text-purple-600" onClick={() => {
                                       setSelectedStockHistoryProduct(product);
                                       if (product.type === 'mayorista' && product.saleLevels && product.saleLevels.length > 0) {
-                                        const sortedLevels = [...product.saleLevels].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained);
+                                        const sortedLevels = [...product.saleLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; });
                                         setSelectedHistoryLevel(sortedLevels[0].name);
                                       } else {
                                         setSelectedHistoryLevel('');
@@ -6745,12 +6766,15 @@ const Index = () => {
                 <Label>Nivel de Venta</Label>
                 <div className="grid gap-2">
                   {selectedMayoristaProduct.saleLevels?.map((level) => {
-                    const isUnidadBased = selectedMayoristaProduct.saleLevels?.some(l => l.name === 'Unidad') && selectedMayoristaProduct.type !== 'mayorista';
+                    const isUnidadBased = selectedMayoristaProduct.saleLevels?.some(l => l.name === 'Unidad');
+                    const stockBase = isUnidadBased
+                      ? (selectedMayoristaProduct.saleLevels?.find(l => l.name === 'Unidad')?.stock ?? 0)
+                      : selectedMayoristaProduct.stock;
                     const availableStock = isUnidadBased
-                      ? Math.floor(selectedMayoristaProduct.stock / level.baseUnitsContained)
+                      ? Math.floor(stockBase / level.baseUnitsContained)
                       : level.stock;
                     const hasStock = isUnidadBased
-                      ? selectedMayoristaProduct.stock >= level.baseUnitsContained
+                      ? stockBase >= level.baseUnitsContained
                       : level.stock > 0;
                     return (
                     <div
@@ -6784,7 +6808,7 @@ const Index = () => {
                         <div className="text-right">
                           <p className="font-bold text-green-600">S/ {level.salePrice.toFixed(2)}</p>
                           {level.name === 'Unidad' ? (
-                            <p className="text-sm text-indigo-600 font-semibold">Stock: {selectedMayoristaProduct.stock} unid.</p>
+                            <p className="text-sm text-indigo-600 font-semibold">Stock: {stockBase} unid.</p>
                           ) : (
                             <p className="text-sm text-indigo-600 font-semibold">Stock: {availableStock} {level.name}(s)</p>
                           )}
@@ -6799,9 +6823,12 @@ const Index = () => {
               {selectedLevelId && (() => {
                 const selectedLevel = selectedMayoristaProduct.saleLevels?.find(l => l.id === selectedLevelId);
                 if (!selectedLevel) return null;
-                const isUnidadBased = selectedMayoristaProduct.saleLevels?.some(l => l.name === 'Unidad') && selectedMayoristaProduct.type !== 'mayorista';
+                const isUnidadBased = selectedMayoristaProduct.saleLevels?.some(l => l.name === 'Unidad');
+                const stockBase = isUnidadBased
+                  ? (selectedMayoristaProduct.saleLevels?.find(l => l.name === 'Unidad')?.stock ?? 0)
+                  : selectedMayoristaProduct.stock;
                 const maxLevels = isUnidadBased
-                  ? Math.floor(selectedMayoristaProduct.stock / selectedLevel.baseUnitsContained)
+                  ? Math.floor(stockBase / selectedLevel.baseUnitsContained)
                   : selectedLevel.stock;
                 return (
                   <div className="space-y-3">
@@ -7244,6 +7271,7 @@ const Index = () => {
                                     >
                                       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
                                     </Button>
+                                    {!(lvl.name === 'Unidad') && (
                                     <Button
                                       type="button"
                                       variant="ghost"
@@ -7253,6 +7281,7 @@ const Index = () => {
                                     >
                                       <Trash2 className="w-3.5 h-3.5" />
                                     </Button>
+                                    )}
                                   </div>
                                 </div>
                                 <div className={`grid gap-2 ${isStockEditable ? 'grid-cols-3' : 'grid-cols-2'}`}>
@@ -7329,24 +7358,26 @@ const Index = () => {
                                   >
                                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                                   </Button>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-6 w-6 text-red-500 hover:text-red-700 hover:bg-red-50"
-                                    onClick={() => setEditMayoristaLevels(editMayoristaLevels.filter(l => l.id !== lvl.id))}
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </Button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <p className="text-xs text-slate-400 italic">No hay niveles. Agrega al menos uno.</p>
+                                    {!(lvl.name === 'Unidad') && (
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-6 w-6 text-red-500 hover:text-red-700 hover:bg-red-50"
+                                      onClick={() => setEditMayoristaLevels(editMayoristaLevels.filter(l => l.id !== lvl.id))}
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </Button>
+                                    )}
+                                 </div>
+                               </div>
+                             )}
+                           </div>
+                           );
+                         })}
+                       </div>
+                     ) : (
+                       <p className="text-xs text-slate-400 italic">No hay niveles. Agrega al menos uno.</p>
                     )}
 
                     <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2.5">
@@ -7710,7 +7741,7 @@ const Index = () => {
             )}
           </DialogHeader>
           {viewingMayoristaProduct && (() => {
-            const sortedLevels = [...(viewingMayoristaProduct.saleLevels || [])].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained);
+            const sortedLevels = [...(viewingMayoristaProduct.saleLevels || [])].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; });
             const colors = [
               { border: 'border-blue-300', bgAccent: 'bg-blue-50', headerBg: 'bg-blue-100', profitBg: 'bg-blue-600' },
               { border: 'border-green-300', bgAccent: 'bg-green-50', headerBg: 'bg-green-100', profitBg: 'bg-green-700' },
@@ -7718,7 +7749,7 @@ const Index = () => {
               { border: 'border-orange-300', bgAccent: 'bg-orange-50', headerBg: 'bg-orange-100', profitBg: 'bg-orange-600' },
               { border: 'border-pink-300', bgAccent: 'bg-pink-50', headerBg: 'bg-pink-100', profitBg: 'bg-pink-600' },
             ];
-            const hasUnidad = viewingMayoristaProduct.saleLevels?.some(l => l.name === 'Unidad') && viewingMayoristaProduct.type !== 'mayorista';
+            const hasUnidad = viewingMayoristaProduct.saleLevels?.some(l => l.name === 'Unidad');
             const unidadLevel = hasUnidad ? sortedLevels.find(l => l.name === 'Unidad') : null;
             return (
               <div className="space-y-8">
@@ -8017,7 +8048,7 @@ const Index = () => {
                     });
                   }
                   const allLevelNames: string[] = [...(viewingMayoristaProduct.saleLevels || [])]
-                    .sort((a, b) => a.baseUnitsContained - b.baseUnitsContained)
+                    .sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; })
                     .map(l => l.name);
                   
                   return (
@@ -8636,7 +8667,7 @@ const Index = () => {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {[...newMayoristaLevels].sort((a, b) => a.baseUnitsContained - b.baseUnitsContained).map((lvl, i) => (
+                          {[...newMayoristaLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((lvl, i) => (
                             <TableRow key={lvl.id}>
                               {editingNewLevelId === lvl.id ? (
                                 <>
@@ -8810,8 +8841,8 @@ const Index = () => {
                   {/* Agregar Nuevo Nivel */}
                   <div className="bg-slate-50 border border-dashed border-slate-200 rounded-lg p-4">
                     <p className="text-xs font-semibold text-slate-700 mb-3">Agregar Nuevo Nivel</p>
-                    {newMayoristaLevels.some(l => l.name === 'Unidad') && (
-                      <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-3">
+                    {newMayoristaLevels.some(l => l.name === 'Unidad') && newMayoristaLevels.length <= 1 && (
+                      <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 mx-1 w-fit">
                         Debes agregar al menos un nivel adicional (Paquete, Ciento, etc.) además de Unidad
                       </p>
                     )}
@@ -8959,7 +8990,7 @@ const Index = () => {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {(() => {
                         const hasUnidad = newMayoristaLevels.some(l => l.name === 'Unidad');
-                        return newMayoristaLevels.map((lvl, i) => {
+                        return [...newMayoristaLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((lvl, i) => {
                           return (
                             <div key={lvl.id} className="bg-slate-50 border border-slate-200 rounded-lg p-3">
                               <div className="flex justify-between items-center">
@@ -9072,7 +9103,7 @@ const Index = () => {
                       <div className="space-y-2">
                         <Label className="text-sm font-medium">Mostrar historial de:</Label>
                         <div className="flex flex-wrap gap-2">
-                        {currentStockHistoryProduct.saleLevels?.sort((a, b) => a.baseUnitsContained - b.baseUnitsContained).map((level) => (
+                        {currentStockHistoryProduct.saleLevels?.sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
                           <Button
                             key={level.id}
                             variant={selectedHistoryLevel === level.name ? "default" : "outline"}
@@ -9113,7 +9144,7 @@ const Index = () => {
                           <div className="space-y-2">
                             <Label className="text-sm font-medium">Nivel</Label>
                             <div className="flex flex-wrap gap-2">
-                              {currentStockHistoryProduct.saleLevels?.sort((a, b) => a.baseUnitsContained - b.baseUnitsContained).map((level) => (
+                              {currentStockHistoryProduct.saleLevels?.sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
                                 <Button
                                   key={level.id}
                                   variant={selectedMayoristaRestockLevel === level.name ? "default" : "outline"}
@@ -9688,7 +9719,7 @@ const Index = () => {
               <div className="space-y-2">
                 <Label className="text-sm font-medium">Eliminar historial de:</Label>
                 <div className="flex flex-wrap gap-2">
-                  {currentStockHistoryProduct.saleLevels?.sort((a, b) => a.baseUnitsContained - b.baseUnitsContained).map((level) => (
+                  {currentStockHistoryProduct.saleLevels?.sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
                     <Button
                       key={level.id}
                       variant={selectedHistoryLevel === level.name ? "destructive" : "outline"}

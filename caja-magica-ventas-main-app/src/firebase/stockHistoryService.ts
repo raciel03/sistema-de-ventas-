@@ -3,9 +3,10 @@ import { db } from './config';
 
 export interface StockHistoryItem {
   id: string;
+  saleId?: string;
   productId: string;
   productName: string;
-  type: 'restock' | 'sale' | 'initial';
+  type: 'restock' | 'sale' | 'initial' | 'price_change';
   quantity: number;
   resultingStock: number;
   date: string;
@@ -17,6 +18,7 @@ export interface StockHistoryItem {
   levelSoldQuantity?: number;
   levelStockAfter?: { [key: string]: number };
   isInitial?: boolean;
+  priceChanges?: { levelName: string; oldSalePrice?: number; newSalePrice?: number; oldPurchasePrice?: number; newPurchasePrice?: number }[];
 }
 
 const COLLECTION = 'stock-history';
