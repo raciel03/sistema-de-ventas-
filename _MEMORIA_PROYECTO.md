@@ -71,6 +71,44 @@ Incluye deploy luego de crear el índice compuesto para `getStockHistoryByProduc
 - [ ] Conectar paginación en UI: reemplazar `getDocs(stockHistoryRef)` por `getRecentStockHistory(50)`, reemplazar `getDocs(salesRef)` por `getRecentSales(50)`, agregar botón "Cargar más"
 - [ ] Nota: `getStockHistoryByProduct(pageSize, cursor?)` necesita actualizarse para aceptar `limit` (actualmente trae todos)
 
+## Última sesión — 27 Julio 2026 (Restauración + Fixes finales)
+
+### 🔴 Opción A REVERTIDA Y DATOS RESTAURADOS
+Se eliminó la corrección automática de tipo que causó que 42 productos se movieran incorrectamente de `unidad` → `mayorista`.
+
+**Restauración ejecutada vía script con firebase-admin:**
+- 42 productos restaurados de `mayorista` → `unidad`
+- Stock tomado del nivel "Unidad" en `saleLevels`
+- `initialStock` tomado del nivel "Unidad"
+- `saleLevels` eliminados completamente de esos productos
+- Backup guardado en: `caja-magica-ventas-main-app/_backup_productos_antes_restaurar.json`
+
+**Estado actual en Firebase:**
+- unidad: 54
+- peso: 1  
+- mayorista: 51
+- Total: 106
+
+### ✅ Fixes que se mantienen
+1. **Guardia en `syncProductsToFirestore`** (línea 621): No ejecuta si data vacío o sospechoso (<5 vs >50 en Firebase)
+2. **Filtro en suscripción** (línea 828): Conserva productos locales aunque no estén en pending ni en Firebase
+3. **Loop de borrado en `syncSalesToFirestore`** (línea 638): Ventas eliminadas localmente también se borran de Firebase
+4. **`inventoryTotals` filtra `mayorista`** (línea 3770): Cards de Inventario General no incluyen valores mayorista
+5. **Tipos en `stockHistoryService.ts`**: Incluye `'price_change'`, `saleId?`, `priceChanges?`
+
+### 🆕 Punto 5: Auto-clasificación al guardar
+**Archivo:** `Index.tsx` línea 622-626
+**Qué hace:** Dentro de `syncProductsToFirestore`, antes de sincronizar se corrige:
+```typescript
+const corregirTipo = (p: Product) => {
+  if (p.saleLevels?.length && p.type !== 'mayorista') {
+    return { ...p, type: 'mayorista' as const, stock: 0 };
+  }
+  return p;
+};
+```
+**Efecto:** Si un producto tiene `saleLevels`, se fuerza `type: "mayorista"` con `stock: 0` al sincronizar. Si no tiene niveles, el tipo se queda como está. Esto previene que vuelva a ocurrir el error de clasificación.
+
 ## Bugs conocidos (no corregidos)
 - `salePricePerKg || 1` en línea ~6422 — si price es 0, usa divisor incorrecto
 - `venta.total - venta.subtotal` sin NaN guard (línea ~2114)
