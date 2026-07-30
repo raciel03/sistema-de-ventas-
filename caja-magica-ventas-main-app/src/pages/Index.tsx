@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { compressImage } from "@/firebase/storage";
+import { uploadProductImage, uploadBase64ToCloudinary } from "@/firebase/storage";
 import qz from "qz-tray";
 import { loginWithEmail, loginWithGoogle, createUserWithoutSignIn, logout as firebaseLogout, onAuthChange } from "@/firebase/auth";
 import { auth } from "@/firebase/config";
@@ -171,6 +171,9 @@ interface AppUser {
 
 const normalizeText = (text: string): string =>
   text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+const normalizeSearch = (text: string): string =>
+  text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 
 const escapeHtml = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -398,6 +401,7 @@ const Index = () => {
   // Edit weight product inputs
   const [editPurchasePerKgInput, setEditPurchasePerKgInput] = useState('');
   const [editSalePerKgInput, setEditSalePerKgInput] = useState('');
+  const [isMigrating, setIsMigrating] = useState(false);
 
   // Sincronización en tiempo real entre pestañas y actualización visual
   const [pricePulse, setPricePulse] = useState(false);
@@ -618,20 +622,8 @@ const Index = () => {
     try { await updateProduct(id, stripUndefined(data)); } catch (e) { console.error('ERROR updateProductFB:', e); }
   }, []);
   const syncProductsToFirestore = useCallback(async (data: Product[]) => {
-    if (data.length === 0) { console.warn('ABORT syncProducts: data vacío, no se borrará Firebase'); return; }
-    const corregirTipo = (p: Product) => {
-      if (p.saleLevels?.length && p.type !== 'mayorista') {
-        return { ...p, type: 'mayorista' as const, stock: 0 };
-      }
-      return p;
-    };
-    data = data.map(corregirTipo);
     try {
-      const current = (await getAllProducts()).map(corregirTipo);
-      if (current.length > 0 && data.length < 5 && current.length > 50) {
-        console.warn('ABORT syncProducts: sospechoso (local='+data.length+' vs firebase='+current.length+')');
-        return;
-      }
+      const current = await getAllProducts();
       const curMap = new Map(current.map(p => [p.id, p]));
       const newMap = new Map(data.map(p => [p.id, p]));
       for (const [id, p] of newMap) {
@@ -830,7 +822,7 @@ const Index = () => {
           createProduct(item.id, stripUndefined(item)).then(() => removePendingId(PENDING.PRODUCTS, item.id)).catch(e => { console.error('ERROR subMerge createProduct:', e); });
         }
       }
-      merged = merged.filter(item => isPendingId(PENDING.PRODUCTS, item.id) || fb.find(x => x.id === item.id) || local.find(x => x.id === item.id));
+      merged = merged.filter(item => isPendingId(PENDING.PRODUCTS, item.id) || fb.find(x => x.id === item.id));
       const fixedProds = merged.map(p => ({
         ...p,
         initialStock: (p.initialStock ?? 0) < p.stock ? p.stock : p.initialStock,
@@ -1438,6 +1430,30 @@ const Index = () => {
     });
   };
 
+  const handleMigrateImages = async () => {
+    setIsMigrating(true);
+    const productsWithBase64 = products.filter(p => p.imageUrl && p.imageUrl.startsWith('data:'));
+    let success = 0, errors = 0;
+    let updatedProducts = [...products];
+    for (let i = 0; i < productsWithBase64.length; i++) {
+      const p = productsWithBase64[i];
+      try {
+        const url = await uploadBase64ToCloudinary(p.imageUrl!, p.id);
+        updatedProducts = updatedProducts.map(pr => pr.id === p.id ? { ...pr, imageUrl: url } : pr);
+        setProducts(updatedProducts);
+        safeSetItem('pos-products', JSON.stringify(updatedProducts));
+        try { await updateProduct(p.id, stripUndefined({ imageUrl: url })); } catch {}
+        success++;
+        toast({ title: `Migrando ${i + 1} de ${productsWithBase64.length}`, description: `${p.name} → OK` });
+      } catch {
+        errors++;
+        toast({ title: `Error ${p.name}`, variant: "destructive" });
+      }
+    }
+    toast({ title: "Migración completada", description: `Éxito: ${success}, Errores: ${errors}` });
+    setIsMigrating(false);
+  };
+
   // Funciones para modal de peso
   const handleWeightQuantityChange = (weight: string, quantity: number) => {
     setWeightQuantities(prev => ({ ...prev, [weight]: quantity }));
@@ -1736,7 +1752,7 @@ const Index = () => {
   };
 
   const agregarProductoVenta = (product: Product) => {
-    const stockValido = product.type === 'mayorista' && product.saleLevels?.some(l => l.name === 'Unidad')
+    const stockValido = product.saleLevels?.some(l => l.name === 'Unidad')
       ? (product.saleLevels.find(l => l.name === 'Unidad')?.stock ?? 0)
       : product.stock;
     if (stockValido <= 0) {
@@ -2406,6 +2422,11 @@ const Index = () => {
     }
   };
 
+  const buscarProductoPorNombre = (name: string, excludeId?: string): Product | undefined => {
+    const normalizado = name.trim().toLowerCase();
+    return products.find(p => p.id !== excludeId && p.name.trim().toLowerCase() === normalizado);
+  };
+
   const agregarProducto = async () => {
     if (!newProduct.name || newProduct.salePrice <= 0 || newProduct.purchasePrice <= 0 || newProduct.stock <= 0) {
       toast({
@@ -2419,12 +2440,22 @@ const Index = () => {
       toast({ title: "Precios inválidos", description: "El precio de compra debe ser menor al precio de venta", variant: "destructive" });
       return;
     }
+    const duplicado = buscarProductoPorNombre(newProduct.name);
+    if (duplicado) {
+      toast({
+        title: "Producto ya existe",
+        description: `Ya existe "${duplicado.name}" (${duplicado.saleLevels?.length ? 'Mayorista' : 'General'}). Edítalo en vez de crear uno nuevo.`,
+        variant: "destructive"
+      });
+      return;
+    }
 
     let imageUrl: string | undefined = undefined;
+    const nuevoProductoId = generateId();
 
     if (newProductImage) {
       try {
-        imageUrl = await compressImage(newProductImage);
+        imageUrl = await uploadProductImage(newProductImage, nuevoProductoId);
       } catch (error) {
         toast({
           title: "Error al procesar imagen",
@@ -2436,7 +2467,7 @@ const Index = () => {
     }
 
     const producto: Product = {
-      id: generateId(),
+      id: nuevoProductoId,
       name: newProduct.name,
       purchasePrice: newProduct.purchasePrice,
       salePrice: newProduct.salePrice,
@@ -2581,7 +2612,7 @@ const Index = () => {
 
     if (editProductImage) {
       try {
-        imageUrl = await compressImage(editProductImage);
+        imageUrl = await uploadProductImage(editProductImage, editingMayoristaProduct.id);
       } catch (error) {
         toast({
           title: "Error al procesar imagen",
@@ -2687,7 +2718,7 @@ const Index = () => {
 
     if (editProductImage) {
       try {
-        imageUrl = await compressImage(editProductImage);
+        imageUrl = await uploadProductImage(editProductImage, editingWeightProduct.id);
       } catch (error) {
         toast({
           title: "Error al procesar imagen",
@@ -2787,7 +2818,7 @@ const Index = () => {
 
     if (editProductImage) {
       try {
-        imageUrl = await compressImage(editProductImage);
+        imageUrl = await uploadProductImage(editProductImage, editingProduct.id);
       } catch (error) {
         toast({
           title: "Error al procesar imagen",
@@ -3056,13 +3087,22 @@ const Index = () => {
       });
       return;
     }
+    const duplicadoMayorista = buscarProductoPorNombre(newMayoristaProduct.name);
+    if (duplicadoMayorista) {
+      toast({
+        title: "Producto ya existe",
+        description: `Ya existe "${duplicadoMayorista.name}" (${duplicadoMayorista.saleLevels?.length ? 'Mayorista' : 'General'}). Edítalo en vez de crear uno nuevo.`,
+        variant: "destructive"
+      });
+      return;
+    }
 
     let imageUrl: string | undefined = undefined;
     const tempId = Date.now().toString();
 
     if (newProductImage) {
       try {
-        imageUrl = await compressImage(newProductImage);
+        imageUrl = await uploadProductImage(newProductImage, tempId);
       } catch (error) {
         toast({
           title: "Error al procesar imagen",
@@ -3153,11 +3193,21 @@ const Index = () => {
       toast({ title: "Precios inválidos", description: "El precio de compra debe ser menor al precio de venta", variant: "destructive" });
       return;
     }
+    const duplicadoPeso = buscarProductoPorNombre(newWeightProduct.name);
+    if (duplicadoPeso) {
+      toast({
+        title: "Producto ya existe",
+        description: `Ya existe "${duplicadoPeso.name}" (${duplicadoPeso.saleLevels?.length ? 'Mayorista' : 'General'}). Edítalo en vez de crear uno nuevo.`,
+        variant: "destructive"
+      });
+      return;
+    }
 
+    const nuevoProductoPesoId = generateId();
     let imageUrl: string | undefined = undefined;
     if (newProductImage) {
       try {
-        imageUrl = await compressImage(newProductImage);
+        imageUrl = await uploadProductImage(newProductImage, nuevoProductoPesoId);
       } catch (error) {
         toast({
           title: "Error al procesar imagen",
@@ -3169,7 +3219,7 @@ const Index = () => {
     }
 
     const productToAdd: Product = {
-      id: generateId(),
+      id: nuevoProductoPesoId,
       name: newWeightProduct.name,
       purchasePrice: newWeightProduct.purchasePrice,
       salePrice: newWeightProduct.salePrice, 
@@ -3705,16 +3755,16 @@ const Index = () => {
   };
 
   const filteredProducts = products.filter(product => {
-    const matchesSearch = normalizeText(product.name).includes(normalizeText(searchTerm)) ||
-      normalizeText(product.category).includes(normalizeText(searchTerm));
+    const matchesSearch = normalizeText(product.name).includes(normalizeSearch(searchTerm)) ||
+      normalizeText(product.category).includes(normalizeSearch(searchTerm));
     if (ventaMode === 'mayor') return matchesSearch && product.saleLevels?.length;
     return matchesSearch && !product.saleLevels?.length;
   });
 
   const filteredInventory = products.filter(product => {
     if (product.saleLevels?.length) return false;
-    const matchesSearch = normalizeText(product.name).includes(normalizeText(inventorySearch)) ||
-                         normalizeText(product.category).includes(normalizeText(inventorySearch));
+    const matchesSearch = normalizeText(product.name).includes(normalizeSearch(inventorySearch)) ||
+                         normalizeText(product.category).includes(normalizeSearch(inventorySearch));
     
     if (inventoryView === 'todos') return matchesSearch;
     if (inventoryView === 'unidad') return matchesSearch && product.type === 'unidad';
@@ -3725,8 +3775,8 @@ const Index = () => {
 
   const filteredMayoristaProducts = products.filter(product =>
     product.saleLevels?.length > 0 &&
-    (normalizeText(product.name).includes(normalizeText(mayoristaSearch)) ||
-     normalizeText(product.category).includes(normalizeText(mayoristaSearch)))
+    (normalizeText(product.name).includes(normalizeSearch(mayoristaSearch)) ||
+     normalizeText(product.category).includes(normalizeSearch(mayoristaSearch)))
   );
 
   const [salesFilter, setSalesFilter] = useState<'all' | 'regular' | 'mayorista'>('all');
@@ -3744,7 +3794,7 @@ const Index = () => {
     if (salesFilter === 'mayorista') matchesFilter = isMayoristaSale(sale);
     let matchesSearch = true;
     if (salesSearch.trim()) {
-      matchesSearch = normalizeText(sale.id).includes(normalizeText(salesSearch));
+      matchesSearch = normalizeText(sale.id).includes(normalizeSearch(salesSearch));
     }
     return matchesFilter && matchesSearch;
   });
@@ -5120,6 +5170,16 @@ const Index = () => {
                           <Trash2 className="w-4 h-4 mr-2" />
                           <span className="font-bold uppercase tracking-widest text-[10px]">Limpiar</span>
                         </Button>
+                      {products.some(p => p.imageUrl?.startsWith('data:')) && (
+                        <Button
+                          onClick={handleMigrateImages}
+                          disabled={isMigrating}
+                          className="bg-sky-600 hover:bg-sky-700 text-white h-10 rounded-xl shadow-lg shadow-sky-200"
+                        >
+                          <CloudUpload className="w-4 h-4 mr-2" />
+                          <span className="font-bold uppercase tracking-widest text-[10px]">{isMigrating ? 'Migrando...' : 'Migrar imágenes'}</span>
+                        </Button>
+                      )}
                     </div>
                 </CardTitle>
               </CardHeader>
@@ -5950,10 +6010,10 @@ const Index = () => {
                     const levelEntries = Object.values(levelSummary);
                     
                     const filteredRegularEntries = regularEntries.filter(([name]) =>
-                      !resumenSearch.trim() || normalizeText(name).includes(normalizeText(resumenSearch))
+                      !resumenSearch.trim() || normalizeText(name).includes(normalizeSearch(resumenSearch))
                     );
                     const filteredLevelEntries = levelEntries.filter(item =>
-                      !resumenSearch.trim() || normalizeText(item.productName).includes(normalizeText(resumenSearch))
+                      !resumenSearch.trim() || normalizeText(item.productName).includes(normalizeSearch(resumenSearch))
                     );
                     
                     const hasRegular = filteredRegularEntries.length > 0;
@@ -6237,7 +6297,7 @@ const Index = () => {
                       if (!transaccionesSearch.trim()) return true;
                       return (
                         sale.id.toLowerCase().includes(transaccionesSearch.toLowerCase()) ||
-                        sale.items.some(item => normalizeText(item.product?.name || '').includes(normalizeText(transaccionesSearch)))
+                        sale.items.some(item => normalizeText(item.product?.name || '').includes(normalizeSearch(transaccionesSearch)))
                       );
                     });
                     
