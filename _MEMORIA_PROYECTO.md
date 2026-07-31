@@ -179,3 +179,11 @@ cd caja-magica-ventas-main-app && npm run dev
 - **Sincronización en vivo confirmada:** `subscribe*` (líneas 937-941) usan `onSnapshot` → los cambios de una PC aparecen en la otra en ~1s SIN recargar. Los `subMerge*` NO llaman a los sync* (no disparan los loops).
 - **Verificación:** `npx tsc --noEmit` sin errores + build + `firebase deploy --only hosting` OK.
 - **Límite conocido (futuro):** si las 2 PCs vendieran el MISMO producto en el MISMO instante, el stock podría quedar con un valor incorrecto ("último que escribe gana"). El usuario NO trabaja en simultáneo (la 2ª PC es solo de consulta), así que no afecta hoy. Se podría reforzar con transacciones atómicas si algún día se necesita venta simultánea real.
+
+### ⚡ Optimización de sincronización (mismo día): memoria de IDs sincronizados (8 cambios)
+- **Objetivo:** dejar de descargar/comparar TODA la colección en cada sincronización de ventas e historial. Ahora solo se sube lo NUEVO.
+- **Cómo:** 2 Sets en RAM (`syncedSaleIds`, `syncedHistoryIds` con `useRef`) recuerdan qué IDs YA están confirmados en Firebase. `syncSalesToFirestore` y `syncHistoryToFirestore` filtran `data.filter(s => !syncedSet.has(s.id))` y solo crean los pendientes (`createSale`/`createStockHistoryItem`), marcándolos tras éxito.
+- **Los Sets se rellenan desde Firebase** en: carga inicial (`mergeInitialData`, cambios 4-5), suscripción en vivo (`subMergeSales`/`subMergeHistory`, cambios 6-7) y sincronización manual (cambio 8).
+- **No afecta el fix de borrado** (los loops siguen comentados) ni el flujo offline (un item fallido no se marca → se reintenta solo).
+- **Nota:** quedan imports sin uso (`updateSale`, `updateStockHistoryItem`) — inofensivos, tsc no los marca. Comentario existente en ~línea 346 ("Ya no se necesita seguimiento de IDs...") quedó contradictorio con el nuevo código (opcional limpiarlo después).
+- **Verificación:** `npx tsc --noEmit` sin errores + build + `firebase deploy --only hosting` OK. Commit GitHub `b115f20` → nuevo commit de optimización.

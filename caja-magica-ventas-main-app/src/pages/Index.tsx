@@ -343,6 +343,10 @@ const Index = () => {
   const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
   const [restockQuantities, setRestockQuantities] = useState<{ [key: string]: string }>({});
   const [stockHistory, setStockHistory] = useState<StockHistoryItem[]>([]);
+  // Recuerdan qué IDs de ventas/historial YA están confirmados (sin cambios) en Firestore,
+  // para no reescribir/redescargar todo en cada venta. No afecta el fix de borrado (sigue desactivado).
+  const syncedSaleIds = useRef<Set<string>>(new Set());
+  const syncedHistoryIds = useRef<Set<string>>(new Set());
   // Ya no se necesita seguimiento de IDs sincronizados — cada sync escribe todo via setDoc (upsert)
   const [modalProductHistory, setModalProductHistory] = useState<StockHistoryItem[]>([]);
   const [isStockHistoryModalOpen, setIsStockHistoryModalOpen] = useState(false);
@@ -637,16 +641,10 @@ const Index = () => {
   }, []);
   const syncSalesToFirestore = useCallback(async (data: any[]) => {
     try {
-      const current = await getAllSales();
-      const curMap = new Map(current.map(s => [s.id, s]));
-      const newMap = new Map(data.map(s => [s.id, s]));
-      for (const [id, s] of newMap) {
-        const existing = curMap.get(id);
-        if (!existing) { await createSale(id, stripUndefined(s)); }
-        else if (JSON.stringify(existing) !== JSON.stringify(s)) { await updateSale(id, stripUndefined(s)); }
-      }
-      // BUG FIX: ya no se borran ventas de Firebase que no están localmente
-      // for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteSale(id); } catch {} } }
+      const pending = data.filter(s => !syncedSaleIds.current.has(s.id));
+      if (pending.length === 0) return;
+      await Promise.all(pending.map(s => createSale(s.id, stripUndefined(s))));
+      pending.forEach(s => syncedSaleIds.current.add(s.id));
     } catch (e) { console.error('ERROR syncSales:', e); }
   }, []);
   const syncClosesToFirestore = useCallback(async (data: any[]) => {
@@ -665,13 +663,10 @@ const Index = () => {
   }, []);
   const syncHistoryToFirestore = useCallback(async (data: any[]) => {
     try {
-      const current = await getAllStockHistory();
-      const curMap = new Map(current.map(h => [h.id, h]));
-      for (const h of data) {
-        const existing = curMap.get(h.id);
-        if (!existing) { await createStockHistoryItem(h.id, stripUndefined(h)); }
-        else if (JSON.stringify(existing) !== JSON.stringify(h)) { await updateStockHistoryItem(h.id, stripUndefined(h)); }
-      }
+      const pending = data.filter(h => !syncedHistoryIds.current.has(h.id));
+      if (pending.length === 0) return;
+      await Promise.all(pending.map(h => createStockHistoryItem(h.id, stripUndefined(h))));
+      pending.forEach(h => syncedHistoryIds.current.add(h.id));
     } catch (e) { console.error('ERROR syncHistory:', e); }
   }, []);
   const syncUsersToFirestore = useCallback(async (data: any[]) => {
@@ -780,6 +775,7 @@ const Index = () => {
           }
           // BUG FIX: conservar TODAS las ventas locales, no solo las pendientes o en Firebase
           // local = local.filter(item => isPendingId(PENDING.SALES, item.id) || fbSales.find(x => x.id === item.id));
+          fbSales.forEach(item => syncedSaleIds.current.add(item.id));
           setSales(local); try { localStorage.setItem('pos-sales', JSON.stringify(local)); } catch {}
         }
         if (fbUsers) {
@@ -798,6 +794,7 @@ const Index = () => {
           let local: StockHistoryItem[] = []; try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
           for (const item of fbHistory) { if (!local.find(x => x.id === item.id)) local.push(item); }
           local = local.filter(item => isPendingId(PENDING.HISTORY, item.id) || fbHistory.find(x => x.id === item.id));
+          fbHistory.forEach(item => syncedHistoryIds.current.add(item.id));
           setStockHistory(local); try { localStorage.setItem('pos-stock-history', JSON.stringify(local)); } catch {}
         }
       } catch {}
@@ -843,6 +840,7 @@ const Index = () => {
       const local: Sale[] = [];
       try { const s = localStorage.getItem('pos-sales'); if (s) local.push(...JSON.parse(s)); } catch {}
       for (const s of fb) { if (!s.localDate) { try { (s as any).localDate = getLocalDateStr(new Date(s.date)); } catch {} } }
+      fb.forEach(item => syncedSaleIds.current.add(item.id));
       let merged: Sale[] = [...local];
       for (const item of fb) {
         const idx = merged.findIndex(x => x.id === item.id);
@@ -916,6 +914,7 @@ const Index = () => {
     const subMergeHistory = (fb: StockHistoryItem[]) => {
       const local: StockHistoryItem[] = [];
       try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
+      fb.forEach(item => syncedHistoryIds.current.add(item.id));
       let merged: StockHistoryItem[] = [...local];
       for (const item of fb) {
         const idx = merged.findIndex(x => x.id === item.id);
@@ -1748,6 +1747,7 @@ const Index = () => {
           if (!item.localDate) { try { (item as any).localDate = getLocalDateStr(new Date(item.date)); } catch {} }
           if (!local.find(x => x.id === item.id)) local.push(item);
         }
+        fbSales.forEach(item => syncedSaleIds.current.add(item.id));
         setSales(local); try { localStorage.setItem('pos-sales', JSON.stringify(local)); } catch {}
       }
       if (fbUsers) {
@@ -1764,6 +1764,7 @@ const Index = () => {
         const local: StockHistoryItem[] = []; try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
         for (const item of fbHistory) { if (!local.find(x => x.id === item.id)) local.push(item); }
         setStockHistory(local); try { localStorage.setItem('pos-stock-history', JSON.stringify(local)); } catch {}
+        fbHistory.forEach(item => syncedHistoryIds.current.add(item.id));
       }
       toast({ title: "Sincronización completa", description: "Datos actualizados desde Firebase" });
     } catch {
