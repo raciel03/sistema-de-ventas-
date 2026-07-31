@@ -631,7 +631,8 @@ const Index = () => {
         if (!existing) { await createProduct(id, stripUndefined(p)); }
         else if (JSON.stringify(existing) !== JSON.stringify(p)) { await updateProduct(id, stripUndefined(p)); }
       }
-      for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteProduct(id); } catch {} } }
+      // BUG FIX: ya no se borran productos de Firebase que no están localmente (protege datos de la otra PC)
+      // for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteProduct(id); } catch {} } }
     } catch (e) { console.error('ERROR syncProducts:', e); }
   }, []);
   const syncSalesToFirestore = useCallback(async (data: any[]) => {
@@ -644,7 +645,8 @@ const Index = () => {
         if (!existing) { await createSale(id, stripUndefined(s)); }
         else if (JSON.stringify(existing) !== JSON.stringify(s)) { await updateSale(id, stripUndefined(s)); }
       }
-      for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteSale(id); } catch {} } }
+      // BUG FIX: ya no se borran ventas de Firebase que no están localmente
+      // for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteSale(id); } catch {} } }
     } catch (e) { console.error('ERROR syncSales:', e); }
   }, []);
   const syncClosesToFirestore = useCallback(async (data: any[]) => {
@@ -657,7 +659,8 @@ const Index = () => {
         if (!existing) { await createDailyClose(id, stripUndefined(c)); }
         else { await updateDailyClose(id, stripUndefined(c)); }
       }
-      for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteDailyClose(id); } catch {} } }
+      // BUG FIX: ya no se borran cierres de Firebase que no están localmente (protege datos de la otra PC)
+      // for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteDailyClose(id); } catch {} } }
     } catch (e) { console.error('ERROR syncCloses:', e); }
   }, []);
   const syncHistoryToFirestore = useCallback(async (data: any[]) => {
@@ -681,7 +684,8 @@ const Index = () => {
         if (!existing) { await createLocalUser(id, stripUndefined(u)); }
         else if (JSON.stringify(existing) !== JSON.stringify(u)) { await updateLocalUser(id, stripUndefined(u)); }
       }
-      for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteLocalUser(id); } catch {} } }
+      // BUG FIX: ya no se borran usuarios de Firebase que no están localmente (protege datos de la otra PC)
+      // for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteLocalUser(id); } catch {} } }
     } catch (e) { console.error('ERROR syncUsers:', e); }
   }, []);
 
@@ -774,7 +778,8 @@ const Index = () => {
             if (!item.localDate) { try { (item as any).localDate = getLocalDateStr(new Date(item.date)); } catch {} }
             if (!local.find(x => x.id === item.id)) local.push(item);
           }
-          local = local.filter(item => isPendingId(PENDING.SALES, item.id) || fbSales.find(x => x.id === item.id));
+          // BUG FIX: conservar TODAS las ventas locales, no solo las pendientes o en Firebase
+          // local = local.filter(item => isPendingId(PENDING.SALES, item.id) || fbSales.find(x => x.id === item.id));
           setSales(local); try { localStorage.setItem('pos-sales', JSON.stringify(local)); } catch {}
         }
         if (fbUsers) {
@@ -855,7 +860,8 @@ const Index = () => {
           createSale(item.id, stripUndefined(item)).then(() => removePendingId(PENDING.SALES, item.id)).catch(e => { console.error('ERROR subMerge createSale:', e); });
         }
       }
-      merged = merged.filter(item => isPendingId(PENDING.SALES, item.id) || fb.find(x => x.id === item.id));
+      // BUG FIX: conservar TODAS las ventas locales en el merge, no solo las pendientes o en Firebase
+      // merged = merged.filter(item => isPendingId(PENDING.SALES, item.id) || fb.find(x => x.id === item.id));
       setSales(merged);
       try { localStorage.setItem('pos-sales', JSON.stringify(merged)); } catch {}
     };
@@ -1543,6 +1549,17 @@ const Index = () => {
   const handleAddWeightToCart = () => {
     if (!selectedWeightProduct) return;
 
+    const pricePerKg = selectedWeightProduct.salePricePerKg ?? selectedWeightProduct.salePrice ?? 0;
+
+    if (weightInputMode === 'money' && pricePerKg <= 0) {
+      toast({
+        title: "Precio no válido",
+        description: "Este producto no tiene precio por kilo; usa el modo por peso",
+        variant: "destructive"
+      });
+      return;
+    }
+
     let totalWeight = 0;
     let totalPrice = 0;
 
@@ -1559,7 +1576,6 @@ const Index = () => {
       }
     } else {
       if (customMoney && parseFloat(customMoney) > 0) {
-        const pricePerKg = selectedWeightProduct.salePrice ?? selectedWeightProduct.salePricePerKg ?? 1;
         totalWeight += Math.round((parseFloat(customMoney) * 1000) / pricePerKg);
       }
     }
@@ -1568,6 +1584,16 @@ const Index = () => {
       toast({
         title: "Entrada requerida",
         description: "Debes seleccionar un peso o ingresar un monto válido para agregar al carrito",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    const minWeight = selectedWeightProduct.minWeightGrams || 0;
+    if (minWeight > 0 && totalWeight < minWeight) {
+      toast({
+        title: "Peso mínimo no alcanzado",
+        description: `El mínimo de venta es ${formatWeight(minWeight)}`,
         variant: "destructive"
       });
       return;
@@ -1583,7 +1609,6 @@ const Index = () => {
     }
 
     // Calcular precio total usando siempre salePricePerKg
-    const pricePerKg = selectedWeightProduct.salePricePerKg ?? selectedWeightProduct.salePrice ?? 0;
     totalPrice = pricePerKg * (totalWeight / 1000);
 
     // Crear un producto temporal para la venta (sin mutar salePrice)
@@ -2026,19 +2051,63 @@ const Index = () => {
       return { ...product, stock: product.stock - totalUnits };
     });
 
-    // Validar stock antes de confirmar (evita sobreventa con 2 pestañas)
+    // Validar stock antes de confirmar (evita sobreventa con 2 pestañas o cajas)
     for (const product of products) {
-      if (product.type === 'mayorista' || product.type === 'peso') continue;
       const saleItems = currentSale.filter(item => item.product.id === product.id);
       if (saleItems.length === 0) continue;
-      const totalQty = saleItems.reduce((sum, item) => sum + item.quantity, 0);
-      if (product.stock - totalQty < 0) {
-        toast({
-          title: "Stock insuficiente",
-          description: `${product.name}: solo quedan ${product.stock} unidades`,
-          variant: "destructive"
-        });
-        return;
+      const hasUnidadLevel = product.saleLevels?.some(l => l.name === 'Unidad');
+
+      if (hasUnidadLevel) {
+        // Modelo A: stock general en unidades compartido entre los niveles
+        const totalUnits = saleItems.reduce((sum, item) => {
+          const level = product.saleLevels?.find(l => l.name === item.selectedLevelName);
+          return sum + ((level?.baseUnitsContained || 1) * item.quantity);
+        }, 0);
+        if (product.stock - totalUnits < 0) {
+          toast({
+            title: "Stock insuficiente",
+            description: `${product.name}: solo quedan ${product.stock} unidades`,
+            variant: "destructive"
+          });
+          return;
+        }
+      } else if (product.type === 'mayorista') {
+        // Modelo B: cada nivel tiene su propio stock
+        for (const saleItem of saleItems) {
+          if (!saleItem.selectedLevelName) {
+            if (product.stock - saleItem.quantity < 0) {
+              toast({
+                title: "Stock insuficiente",
+                description: `${product.name}: solo quedan ${product.stock} unidades`,
+                variant: "destructive"
+              });
+              return;
+            }
+            continue;
+          }
+          const level = product.saleLevels?.find(l => l.name === saleItem.selectedLevelName);
+          if (level && level.stock - saleItem.quantity < 0) {
+            toast({
+              title: "Stock insuficiente",
+              description: `${product.name} (${level.name}): solo quedan ${level.stock} disponibles`,
+              variant: "destructive"
+            });
+            return;
+          }
+        }
+      } else {
+        // Unidad simple o Peso (cantidad en gramos vs stock en gramos)
+        const totalQty = saleItems.reduce((sum, item) => sum + item.quantity, 0);
+        if (product.stock - totalQty < 0) {
+          toast({
+            title: "Stock insuficiente",
+            description: product.type === 'peso'
+              ? `${product.name}: solo quedan ${formatWeight(product.stock)}`
+              : `${product.name}: solo quedan ${product.stock} unidades`,
+            variant: "destructive"
+          });
+          return;
+        }
       }
     }
 
@@ -2110,6 +2179,18 @@ const Index = () => {
       aplicarRedondeo
     };
 
+    const productsToUpdate = updatedProducts.filter(p => {
+      const old = products.find(ex => ex.id === p.id);
+      return old && (old.stock !== p.stock || old.salePrice !== p.salePrice || old.purchasePrice !== p.purchasePrice || JSON.stringify(old.saleLevels) !== JSON.stringify(p.saleLevels));
+    });
+    const productsToCreate = updatedProducts.filter(p => !products.find(ex => ex.id === p.id));
+
+    // Marcar venta y productos como "EN CAMINO" ANTES de guardar en el navegador,
+    // para que el merge en tiempo real jamás los oculte antes de llegar a Firebase.
+    addPendingId(PENDING.SALES, newSale.id);
+    productsToUpdate.forEach(p => addPendingId(PENDING.PRODUCTS, p.id));
+    productsToCreate.forEach(p => addPendingId(PENDING.PRODUCTS, p.id));
+
     setProducts(updatedProducts);
     setSales([...sales, newSale]);
     setStockHistory(updatedHistory);
@@ -2128,17 +2209,17 @@ const Index = () => {
 
     imprimirTicket(newSale);
 
-    // Intentar sync a Firebase directo (tiempo real)
-    createSale(newSale.id, stripUndefined(newSale)).catch(e => { console.error('ERROR createSale:', e); addPendingId(PENDING.SALES, newSale.id); });
-    // Escribir solo los productos que cambiaron - directo sin leer todo
-    const productsToUpdate = updatedProducts.filter(p => {
-      const old = products.find(ex => ex.id === p.id);
-      return old && (old.stock !== p.stock || old.salePrice !== p.salePrice || old.purchasePrice !== p.purchasePrice || JSON.stringify(old.saleLevels) !== JSON.stringify(p.saleLevels));
-    });
-    const productsToCreate = updatedProducts.filter(p => !products.find(ex => ex.id === p.id));
+    // Intentar sync a Firebase directo (tiempo real); quitar "EN CAMINO" al confirmar
+    createSale(newSale.id, stripUndefined(newSale))
+      .then(() => removePendingId(PENDING.SALES, newSale.id))
+      .catch(e => { console.error('ERROR createSale:', e); addPendingId(PENDING.SALES, newSale.id); });
     Promise.all([
-      ...productsToUpdate.map(p => updateProduct(p.id, stripUndefined({ stock: p.stock, salePrice: p.salePrice, purchasePrice: p.purchasePrice, saleLevels: p.saleLevels })).catch(e => { console.error('ERROR updateProduct:', e); addPendingId(PENDING.PRODUCTS, p.id); })),
-      ...productsToCreate.map(p => createProduct(p.id, stripUndefined(p)).catch(e => { console.error('ERROR createProduct:', e); addPendingId(PENDING.PRODUCTS, p.id); })),
+      ...productsToUpdate.map(p => updateProduct(p.id, stripUndefined({ stock: p.stock, salePrice: p.salePrice, purchasePrice: p.purchasePrice, saleLevels: p.saleLevels }))
+        .then(() => removePendingId(PENDING.PRODUCTS, p.id))
+        .catch(e => { console.error('ERROR updateProduct:', e); addPendingId(PENDING.PRODUCTS, p.id); })),
+      ...productsToCreate.map(p => createProduct(p.id, stripUndefined(p))
+        .then(() => removePendingId(PENDING.PRODUCTS, p.id))
+        .catch(e => { console.error('ERROR createProduct:', e); addPendingId(PENDING.PRODUCTS, p.id); })),
     ]);
     syncHistoryToFirestore(updatedHistory).catch(e => { console.error('ERROR syncHistory:', e); newHistoryItems.forEach(h => addPendingId(PENDING.HISTORY, h.id)); });
     autoCleanupLocal();
@@ -2229,7 +2310,7 @@ const Index = () => {
     };
     const igvCalc = venta.igv || 0;
     const totalSinRedondeo = venta.subtotal;
-    const redondeo = venta.total - totalSinRedondeo;
+    const redondeo = (isFinite(venta.total) && isFinite(totalSinRedondeo)) ? venta.total - totalSinRedondeo : 0;
     const mostrarRedondeo = venta.paymentMethod === 'efectivo' && venta.aplicarRedondeo && Math.abs(redondeo) >= 0.01;
     const logoHtml = companyLogo
       ? `<img src="${companyLogo}" alt="Logo" style="width: 160px; height: auto; display: block; margin: 0 auto 4mm auto; max-height: 80px; object-fit: contain; background: white; padding: 6px; border-radius: 6px; filter: contrast(1.3) brightness(0.95);" />`
@@ -3321,6 +3402,7 @@ const Index = () => {
 
     try {
       let fbUid = '';
+      let usuario: AppUser | undefined;
 
       if (newUser.role === 'empleado') {
         // Crear usuario sin cambiar la sesión del admin
@@ -3335,7 +3417,7 @@ const Index = () => {
           isActive: true,
         });
 
-        const usuario: AppUser = {
+        usuario = {
           id: fbUid,
           username: userUsername,
           password: await hashPassword(newUser.password),
@@ -3363,7 +3445,7 @@ const Index = () => {
         });
         const adminPassword = newUser.password || 'admin';
         const adminHashedPassword = await hashPassword(adminPassword);
-        const usuario: AppUser = {
+        usuario = {
           id: fbUid,
           username: userUsername,
           password: adminHashedPassword,
@@ -3389,7 +3471,7 @@ const Index = () => {
       
       toast({
         title: "Usuario agregado",
-        description: `${newUser.role === 'admin' ? 'Administrador' : 'Usuario'} ${usuario.username} creado exitosamente`,
+        description: `${newUser.role === 'admin' ? 'Administrador' : 'Usuario'} ${usuario?.username} creado exitosamente`,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Error al crear usuario";
@@ -6728,8 +6810,8 @@ const Index = () => {
                       {customMoney && parseFloat(customMoney) > 0 && (
                         <p className="text-xs text-blue-600 font-semibold mt-1">
                           Equivale a: {(() => {
-                            const pricePerKg = selectedWeightProduct.salePricePerKg || 1;
-                            const equiv = Math.round((parseFloat(customMoney) * 1000) / pricePerKg);
+                            const pricePerKg = selectedWeightProduct.salePricePerKg || 0;
+                            const equiv = pricePerKg > 0 ? Math.round((parseFloat(customMoney) * 1000) / pricePerKg) : 0;
                             return formatWeight(equiv);
                           })()}
                         </p>
@@ -6753,8 +6835,8 @@ const Index = () => {
                           }
                         } else {
                           if (customMoney && parseFloat(customMoney) > 0) {
-                            const pricePerKg = selectedWeightProduct.salePricePerKg || 1;
-                            total += Math.round((parseFloat(customMoney) * 1000) / pricePerKg);
+                            const pricePerKg = selectedWeightProduct.salePricePerKg || 0;
+                            total += pricePerKg > 0 ? Math.round((parseFloat(customMoney) * 1000) / pricePerKg) : 0;
                           }
                         }
                         return formatWeight(total);
@@ -6775,8 +6857,8 @@ const Index = () => {
                           }
                         } else {
                           if (customMoney && parseFloat(customMoney) > 0) {
-                            const pricePerKg = selectedWeightProduct.salePricePerKg || 1;
-                            totalWeight += Math.round((parseFloat(customMoney) * 1000) / pricePerKg);
+                            const pricePerKg = selectedWeightProduct.salePricePerKg || 0;
+                            totalWeight += pricePerKg > 0 ? Math.round((parseFloat(customMoney) * 1000) / pricePerKg) : 0;
                           }
                         }
                         return ((selectedWeightProduct.salePricePerKg || 0) * (totalWeight / 1000)).toFixed(2);

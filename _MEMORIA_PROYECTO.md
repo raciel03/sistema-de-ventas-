@@ -4,7 +4,7 @@
 - **Live URL:** https://sistema-de-ventas-milam.web.app
 - **Firebase project:** `sistema-de-ventas-milam`
 - **GitHub:** https://github.com/raciel03/sistema-de-ventas- (privado)
-- **Archivo principal:** `caja-magica-ventas-main-app/src/pages/Index.tsx` (~10327 líneas)
+- **Archivo principal:** `caja-magica-ventas-main-app/src/pages/Index.tsx` (~10497 líneas)
 - **Backup:** `_backup_antes_stock_unificado/`
 
 ## Última sesión — 24 Julio 2026
@@ -110,9 +110,9 @@ const corregirTipo = (p: Product) => {
 **Efecto:** Si un producto tiene `saleLevels`, se fuerza `type: "mayorista"` con `stock: 0` al sincronizar. Si no tiene niveles, el tipo se queda como está. Esto previene que vuelva a ocurrir el error de clasificación.
 
 ## Bugs conocidos (no corregidos)
-- `salePricePerKg || 1` en línea ~6422 — si price es 0, usa divisor incorrecto
-- `venta.total - venta.subtotal` sin NaN guard (línea ~2114)
 - `StockHistoryItem.type` en `stockHistoryService.ts` no incluye `'price_change'` (solo en interfaz local de Index.tsx)
+- ✅ `salePricePerKg || 1` → CORREGIDO el 31 Julio (modal de peso, ya no inventa precio)
+- ✅ `venta.total - venta.subtotal` sin NaN guard → CORREGIDO el 31 Julio (guardia `isFinite`)
 
 ## Comandos útiles
 ```powershell
@@ -131,3 +131,51 @@ cd caja-magica-ventas-main-app && npm run dev
 - Límite real del navegador ~5MB
 - App requiere internet (no hay offline)
 - `getStockHistoryByProduct()` requiere índice compuesto `productId ASC + date ASC` en Firestore
+
+## Última sesión — 31 Julio 2026 (Ventas que desaparecían + fixes de stock)
+
+### 🔴 Problema principal diagnosticado
+- **0 ventas en Firebase el 30/07** (última registrada el 27/07). Las ventas hechas desde **otra PC** no aparecían en esta PC.
+- **Causa raíz:** los filtros `local.filter(item => isPendingId(...) || fb.find(...))` ocultaban ventas locales que todavía no estaban en Firebase NI marcadas como pendientes.
+- El pending solo se marcaba cuando la subida **fallaba** (`createSale(...).catch(e => addPendingId(...))`), así que durante la ventana normal de subida la venta quedaba "sin marcar" → el filtro la ocultaba/borraba.
+- **Recuperación:** no es posible recuperar las ventas de hoy desde esta PC (no estaban en Firebase ni en este localStorage). Los fixes previenen pérdidas futuras.
+
+### 📌 Modelos de stock (referencia clave, NO confundir)
+- **Modelo A — "Unidad + Niveles"** (producto tiene un nivel llamado `'Unidad'` en `saleLevels`): el stock general en **unidades** es compartido; vender 1 nivel descuenta `baseUnitsContained × cantidad` del stock general (y del nivel "Unidad"). Los demás niveles (Paquete/Ciento/Fardo) **NO tienen stock real** — solo sirven para elegir precio. Al crear con nivel "Unidad", el formulario FUERZA stock 0 en los otros niveles.
+- **Modelo B — Mayorista puro** (mayorista SIN nivel `'Unidad'`): **cada nivel tiene su propio stock**; vender descuenta del nivel vendido y el stock general se recalcula como `Σ (nivel.stock × baseUnitsContained)`.
+- **Unidad simple:** unidades. **Peso:** gramos.
+- El interruptor entre Modelo A y B es **la existencia del nivel "Unidad"** (línea ~1988), NO el `type` del producto. "Mayorista con Unidad" y "Unidad + Niveles" son el MISMO modelo (la etiqueta `type` solo refleja datos viejos vs nuevos).
+
+### ✅ Fixes aplicados y desplegados (build + `firebase deploy --only hosting` OK)
+1. **Pending optimista en ventas y productos:** en `confirmarVenta` se hace `addPendingId(...)` **ANTES** de guardar en localStorage, y `removePendingId` al confirmar en Firebase (`.then()`). Elimina la carrera que ocultaba ventas.
+2. **Validación de stock al confirmar reescrita:** ya NO salta `mayorista`/`peso`. Valida: Modelo A multiplicando por `baseUnitsContained`, Modelo B por stock de nivel, peso por gramos. Bloquea sobreventa con 2 pestañas/cajas.
+3. **Modal de peso:** `salePricePerKg || 1` → `|| 0` con guardia (si no hay precio, bloquea modo "por dinero" con aviso). Se respeta `minWeightGrams` (mínimo de venta). Sigue bloqueando venta en 0.
+4. **Guardia NaN** en redondeo de boleta (`isFinite`).
+5. **Filtros en líneas ~779 y ~861 quedan COMENTADOS deliberadamente** → no se borra nada local. Costo: lo borrado desde otra PC no desaparece aquí automáticamente (se puede borrar a mano). Solo reactivar si se quiere propagar borrados, y solo con el pending optimista funcionando.
+
+### 🧰 Herramientas de diagnóstico
+- Script `_consultar_ventas_hoy` (temporal): consulta ventas de hoy desde Firebase. `firebase-admin` v14 usa **`admin.cert()`** (NO `admin.credential.cert()`); debe ejecutarse desde `caja-magica-ventas-main-app` (ahí vive `node_modules`) y como `.cjs` (la app tiene `"type": "module"`).
+- Key de servicio admin: `C:\Users\Raciel\Downloads\sistema-de-ventas-milam-firebase-adminsdk-fbsvc-1aa8f02017.json`.
+
+### ⚠️ Recomendaciones pendientes
+- Antes de desplegar la app en la otra PC, verificar que reciba los fixes (mismo build).
+- Opcional futuro: exportar/importar ventas a JSON e ID único por PC en `generateSaleId()` para evitar colisiones.
+
+### 🐞 Fix posterior (mismo día): `usuario is not defined` al crear usuarios
+- **Síntoma:** al agregar un usuario administrador (o cualquier usuario) salía "Error: usuario is not defined".
+- **Causa raíz:** en `agregarUsuario`, `const usuario` se declaraba DENTRO de cada rama `if/else` (bloques `{}`). En JS, `const` es de ámbito de bloque, así que en el toast (fuera de ambos bloques) la referencia `usuario.username` lanzaba `ReferenceError`. La creación SÍ ocurría (Firebase Auth + perfil + lista local), solo fallaba el aviso.
+- **Por qué compilaba:** el build es `vite build` (esbuild), que NO revisa tipos; TypeScript sí lo habría detectado.
+- **Fix:** `let usuario: AppUser | undefined;` declarado en el ámbito del `try`, asignación `usuario = {...}` en ambas ramas, y `usuario?.username` en el toast.
+- **Verificación:** `npx tsc --noEmit` pasó sin errores → no quedan más variables fuera de ámbito en Index.tsx. Build + deploy OK.
+- ⚠️ **Lección:** correr `npx tsc --noEmit` antes de desplegar (el build de Vite no detecta estos errores).
+
+### 🔒 Fix posterior (mismo día): loops de borrado en sincronizadores (protección 2 PCs)
+- **Motivo:** con 2 PCs, los sincronizadores tenían un loop de borrado idéntico al que causó la desaparición de ventas: *"borra de Firebase lo que no está en la lista local"*. Si una PC con datos desactualizados hacía cualquier acción que sincronizara, podía borrar silenciosamente cierres/productos/usuarios que la OTRA PC acababa de guardar (sin pedir contraseña).
+- **Fix:** se comentaron los 3 loops (mismo patrón que el de ventas, línea 648):
+  - `syncProductsToFirestore` (~línea 634) → loop de `deleteProduct`
+  - `syncClosesToFirestore` (~línea 661) → loop de `deleteDailyClose`
+  - `syncUsersToFirestore` (~línea 685) → loop de `deleteLocalUser`
+- **No se rompe el borrado intencional:** `eliminarProducto`/`deleteSelectedProducts` usan `deleteProduct(id)` directo; los cierres usan `deleteDailyClose(id)` directo. Solo se desactiva el borrado automático ciego.
+- **Sincronización en vivo confirmada:** `subscribe*` (líneas 937-941) usan `onSnapshot` → los cambios de una PC aparecen en la otra en ~1s SIN recargar. Los `subMerge*` NO llaman a los sync* (no disparan los loops).
+- **Verificación:** `npx tsc --noEmit` sin errores + build + `firebase deploy --only hosting` OK.
+- **Límite conocido (futuro):** si las 2 PCs vendieran el MISMO producto en el MISMO instante, el stock podría quedar con un valor incorrecto ("último que escribe gana"). El usuario NO trabaja en simultáneo (la 2ª PC es solo de consulta), así que no afecta hoy. Se podría reforzar con transacciones atómicas si algún día se necesita venta simultánea real.
