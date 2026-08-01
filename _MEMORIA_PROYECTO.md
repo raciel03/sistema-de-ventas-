@@ -187,3 +187,12 @@ cd caja-magica-ventas-main-app && npm run dev
 - **No afecta el fix de borrado** (los loops siguen comentados) ni el flujo offline (un item fallido no se marca → se reintenta solo).
 - **Nota:** quedan imports sin uso (`updateSale`, `updateStockHistoryItem`) — inofensivos, tsc no los marca. Comentario existente en ~línea 346 ("Ya no se necesita seguimiento de IDs...") quedó contradictorio con el nuevo código (opcional limpiarlo después).
 - **Verificación:** `npx tsc --noEmit` sin errores + build + `firebase deploy --only hosting` OK. Commit GitHub `b115f20` → nuevo commit de optimización.
+
+### 🖨️ Fix impresión vertical (mismo día): QZ Tray no forzaba orientación
+- **Problema:** la boleta salía horizontal. El CSS del navegador ya era vertical (`@page { size: 80mm auto; orientation: portrait }`, sin cambios desde el primer commit), pero la **impresión directa QZ Tray** usaba `qz.configs.create(printerName)` SIN orientación → tomaba la config de la impresora (horizontal).
+- **Fix (línea ~2490):** config de QZ Tray ahora fuerza vertical y ancho de ticket:
+  ```js
+  const config = qz.configs.create(printerName, { orientation: 0, paperSize: { width: '80mm', height: 'auto' } });
+  ```
+- El diálogo del navegador se deja igual (`80mm auto` + portrait) → sigue vertical y se adapta al largo según lo vendido (NO se fija altura para no dejar espacio vacío).
+- **Verificación:** tsc sin errores + build + deploy OK.

@@ -2487,7 +2487,10 @@ const Index = () => {
         const printerName = selectedQzPrinter || printers[0];
         if (!printerName) throw new Error('No hay impresora seleccionada');
         const htmlData = generarBoletaHTML(venta);
-        const config = qz.configs.create(printerName);
+        const config = qz.configs.create(printerName, {
+          orientation: 0,
+          paperSize: { width: '80mm', height: 'auto' }
+        });
         const data = [{ type: 'html', format: 'plain', data: htmlData }];
         await qz.print(config, data);
         toast({ title: "Boleta impresa", description: "Impresión directa exitosa" });
