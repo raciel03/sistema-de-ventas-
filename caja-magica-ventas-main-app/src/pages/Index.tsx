@@ -5761,8 +5761,8 @@ const Index = () => {
                           <div className={`flex justify-between items-center px-4 py-3 ${isMayoristaItem ? 'bg-purple-600 text-white' : 'bg-indigo-600 text-white'}`}>
                           <div className="font-medium flex items-center gap-2">
                             {item.product.name}
-                            <Badge variant="secondary" className={`text-[10px] ${isMayoristaItem ? 'bg-pink-200 text-pink-800 border-pink-300' : item.product.type === 'peso' ? 'bg-amber-200 text-amber-800 border-amber-300' : 'bg-blue-200 text-blue-800 border-blue-300'}`}>
-                              {isMayoristaItem ? 'Mayorista' : item.product.type === 'peso' ? 'Peso' : 'Unidad'}
+                            <Badge variant="secondary" className={`text-[10px] ${isMayoristaItem ? 'bg-pink-200 text-pink-800 border-pink-300' : item.product.type === 'peso' ? 'bg-amber-200 text-amber-800 border-amber-300' : !item.selectedLevelName ? 'bg-teal-200 text-teal-800 border-teal-300' : 'bg-blue-200 text-blue-800 border-blue-300'}`}>
+                              {isMayoristaItem ? 'Mayorista' : item.product.type === 'peso' ? 'Peso' : !item.selectedLevelName ? 'Unidad Simple' : 'Unidad'}
                             </Badge>
                           </div>
                           {!isMayoristaItem && (

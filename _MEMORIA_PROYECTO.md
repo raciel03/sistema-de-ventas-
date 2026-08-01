@@ -239,3 +239,12 @@ cd caja-magica-ventas-main-app && npm run dev
 - **Cambio 2 — Modal Cerrar Caja (líneas ~6416-6442):** `hasUnidad` ahora es SOLO `selectedLevelName === 'Unidad'` (antes incluía la unidad simple, mezclando ambos en azul); nueva const `hasUnidadSimple` con badge teal. "Peso" (ámbar) ya existía ahí.
 - **No se tocó:** modal Detalle de Venta (ya distinguía: mayorista→rosa, regular→azul, peso→ámbar), filtros ni lógica de negocio/datos.
 - **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK. En la otra PC: **Ctrl+Shift+R**.
+
+### 🏷️ Fix Detalle de Venta: badge de unidad simple dice "Unidad Simple" (31/07/2026)
+- **Pedido:** en el modal Detalle de Venta (sección "PRODUCTOS VENDIDOS"), la unidad simple seguía mostrando el badge azul "Unidad" (confundible con mayorista Modelo A). Se pidió que dijera "Unidad Simple", SIN tocar la boleta.
+- **Cambio (líneas ~5764-5765, solo el badge del modal):** el else final del ternario ahora distingue:
+  - `!item.selectedLevelName` (unidad simple) → texto **"Unidad Simple"** en teal (`bg-teal-200 text-teal-800 border-teal-300`)
+  - con `selectedLevelName` (Modelo A vendido por nivel Unidad) → **"Unidad"** azul (sin cambios)
+  - Mayorista (rosa) y Peso (ámbar) → sin cambios
+- **Boleta intacta:** la boleta (impresión/QZ) la genera `generarBoletaHTML` (línea 2302) con HTML propio e independiente; este badge JSX no la toca. Verificado que esa función no contiene "Unidad Simple".
+- **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK. En la otra PC: **Ctrl+Shift+R**.
