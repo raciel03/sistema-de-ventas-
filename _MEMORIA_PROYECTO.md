@@ -204,3 +204,15 @@ cd caja-magica-ventas-main-app && npm run dev
 - **Detalle cosmético (línea 9051):** la etiqueta "Stock (...)" solo muestra el nombre del nivel si hay dropdown seleccionado (evita "Stock ()").
 - **Confirma NO regresión:** la línea 9115 no se tocaba desde el commit inicial (35c8a93) — verificado con `git log`. No es una regresión de los fixes anteriores (impresión/sync/usuarios tocan otras líneas).
 - **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK. En la otra PC: recargar con **Ctrl+Shift+R** para descartar bundle cacheado.
+
+### 🐛🔧 Fixes de estabilidad + Modelo A en Historial de stock (31/07/2026): 4 cambios
+- **Objetivo:** blindar crashes del mismo tipo que el removeChild y corregir el restock del "Historial de stock" para productos **Modelo A** ("Unidad + niveles"). Ninguno cambia lógica de negocio ni datos.
+- **Bug 1 (crítico, mismo removeChild):** el modal **editar** producto mayorista hacía `setEditLevelDropdown('Paquete')` (línea 2639). Si el producto ya tenía nivel "Paquete", el `Select` quedaba con valor inexistente (opción filtrada en ~7538) → mismo crash intermitente que Agregar. Fix: `setEditLevelDropdown('')`.
+- **Bug 2 (.sort() que mutaban estado):** 4 sitios ordenaban arrays del estado EN SU LUGAR: los botones de nivel del Historial (líneas 9252, 9293, 9868 sobre `currentStockHistoryProduct.saleLevels`) y el historial del modal (línea 9473 sobre `modalProductHistory`). Fix: copiar antes de ordenar con `[...(... || [])].sort(...)`. Sin cambio visual.
+- **Bug 3 (.toFixed() sobre precios indefinidos):** blindaje `(x ?? 0).toFixed(2)` en ~14 sitios que mostraban precios de nivel/producto (`purchasePrice`/`salePrice`): 5082-5083, 6955, 7039, 7480-7502, 8016/8021/8118/8123, 8938-8941, 9727, y `gananciaPorUnidad` (7980, 8102). Si un producto legado/migrado tenía un nivel sin precio → `undefined.toFixed(2)` → TypeError → pantalla blanca (solo en la PC con esos datos).
+- **Fix 4 (Historial de stock respeta Modelo A vs B):** el interruptor es la existencia del nivel **"Unidad"** (documentado en líneas 144-147). Antes el modal mostraba la sección por niveles para TODOS los mayoristas. Ahora:
+  - **Modelo A** (`type === 'mayorista'` CON nivel "Unidad"): usa la sección general (stock en unidades, restock "Cantidad (unidades)" vía `handleAddStockHistoryRestock`, historial general, sin botones por nivel). El botón "Agregar reposición" y el formulario se habilitaron para Modelo A (líneas ~9694 y ~9735).
+  - **Modelo B** (mayorista SIN "Unidad"): sección por niveles intacta (filtrar por nivel, restock por nivel con stock/vendidos).
+  - El diálogo "Eliminar historial" también oculta los botones por nivel para Modelo A (línea ~9864).
+- **NO era regresión:** el formulario por niveles en Historial existía desde el commit inicial (verificado con `git log -S`) y los fixes anteriores no lo tocaban.
+- **Verificación:** `npx tsc --noEmit` + `npm run build` + `firebase deploy --only hosting` OK. En la otra PC: **Ctrl+Shift+R** y probar: editar mayorista con nivel "Paquete" → tocar "Agregar Nivel"; historial de un mayorista Modelo A (restock en unidades) y Modelo B (por nivel).

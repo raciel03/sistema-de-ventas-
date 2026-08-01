@@ -2636,7 +2636,7 @@ const Index = () => {
     setEditMayoristaName(product.name);
     setEditMayoristaCategory(product.category);
     setEditMayoristaLevels(product.saleLevels ? [...product.saleLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }) : []);
-    setEditLevelDropdown('Paquete');
+    setEditLevelDropdown('');
     setEditLevelContains('');
     setEditLevelPurchasePrice('');
     setEditLevelSalePrice('');
@@ -5079,8 +5079,8 @@ const Index = () => {
                                       </TooltipTrigger>
                                       <TooltipContent>
                                         <p className="text-xs">{level.name === 'Unidad' ? '1 unid.' : `Contiene: ${level.baseUnitsContained} unid.`}</p>
-                                        <p className="text-xs">Compra: S/ {level.purchasePrice.toFixed(2)}</p>
-                                        <p className="text-xs">Venta: S/ {level.salePrice.toFixed(2)}</p>
+                                        <p className="text-xs">Compra: S/ {(level.purchasePrice ?? 0).toFixed(2)}</p>
+                                        <p className="text-xs">Venta: S/ {(level.salePrice ?? 0).toFixed(2)}</p>
                                         {level.name === 'Unidad' ? (
                                           <p className="text-xs font-semibold">Stock: {product.stock} unid.</p>
                                         ) : (
@@ -6952,7 +6952,7 @@ const Index = () => {
                           </p>
                         </div>
                         <div className="text-right">
-                          <p className="font-bold text-green-600">S/ {level.salePrice.toFixed(2)}</p>
+                          <p className="font-bold text-green-600">S/ {(level.salePrice ?? 0).toFixed(2)}</p>
                           {level.name === 'Unidad' ? (
                             <p className="text-sm text-indigo-600 font-semibold">Stock: {stockBase} unid.</p>
                           ) : (
@@ -7036,7 +7036,7 @@ const Index = () => {
                     <div className="bg-gray-50 p-3 rounded-lg space-y-1">
                       <div className="flex justify-between text-sm">
                         <span>Precio por {selectedLevel.name}:</span>
-                        <span className="font-semibold">S/ {selectedLevel.salePrice.toFixed(2)}</span>
+                        <span className="font-semibold">S/ {(selectedLevel.salePrice ?? 0).toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between text-sm">
                         <span>Cantidad:</span>
@@ -7477,15 +7477,15 @@ const Index = () => {
                                   <p className="font-semibold text-slate-800">{lvl.name}</p>
                                   {lvl.name === 'Unidad' ? (
                                     <p className="text-[10px] text-slate-500">
-                                      Contiene: {lvl.baseUnitsContained} unid. &middot; Stock: {lvl.stock} unid. &middot; S/ {lvl.salePrice.toFixed(2)} (Compra: S/ {lvl.purchasePrice.toFixed(2)})
+                                      Contiene: {lvl.baseUnitsContained} unid. &middot; Stock: {lvl.stock} unid. &middot; S/ {(lvl.salePrice ?? 0).toFixed(2)} (Compra: S/ {(lvl.purchasePrice ?? 0).toFixed(2)})
                                     </p>
                                   ) : hasUnidad ? (
                                     <p className="text-[10px] text-slate-500">
-                                      Contiene: {lvl.baseUnitsContained} unid. &middot; S/ {lvl.salePrice.toFixed(2)} (Compra: S/ {lvl.purchasePrice.toFixed(2)})
+                                      Contiene: {lvl.baseUnitsContained} unid. &middot; S/ {(lvl.salePrice ?? 0).toFixed(2)} (Compra: S/ {(lvl.purchasePrice ?? 0).toFixed(2)})
                                     </p>
                                   ) : (
                                     <p className="text-[10px] text-slate-500">
-                                      Contiene: {lvl.baseUnitsContained} unid. &middot; Stock: {lvl.stock} {lvl.name}(s) &middot; S/ {lvl.salePrice.toFixed(2)} (Compra: S/ {lvl.purchasePrice.toFixed(2)})
+                                      Contiene: {lvl.baseUnitsContained} unid. &middot; Stock: {lvl.stock} {lvl.name}(s) &middot; S/ {(lvl.salePrice ?? 0).toFixed(2)} (Compra: S/ {(lvl.purchasePrice ?? 0).toFixed(2)})
                                     </p>
                                   )}
                                 </div>
@@ -7498,8 +7498,8 @@ const Index = () => {
                                     onClick={() => {
                                       setEditingLevelId(lvl.id);
                                       setEditLevelTempStock(String(lvl.stock));
-                                      setEditLevelTempSalePrice(String(lvl.salePrice.toFixed(2)));
-                                      setEditLevelTempPurchasePrice(String(lvl.purchasePrice.toFixed(2)));
+                                      setEditLevelTempSalePrice(String((lvl.salePrice ?? 0).toFixed(2)));
+                                      setEditLevelTempPurchasePrice(String((lvl.purchasePrice ?? 0).toFixed(2)));
                                     }}
                                   >
                                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
@@ -7977,7 +7977,7 @@ const Index = () => {
                         <div className="grid grid-cols-1 gap-6">
                           {sortedLevels.map((level, idx) => {
                             const color = colors[idx % colors.length];
-                            const gananciaPorUnidad = level.salePrice - level.purchasePrice;
+                            const gananciaPorUnidad = (level.salePrice ?? 0) - (level.purchasePrice ?? 0);
                             const valorCompraTotal = level.initialStock * level.purchasePrice;
                             const valorVentaTotal = level.initialStock * level.salePrice;
                             const gananciaNivelTotal = level.initialStock * gananciaPorUnidad;
@@ -8013,12 +8013,12 @@ const Index = () => {
                                       {userRole === 'admin' && (
                                       <div className="flex justify-between items-center pb-3 border-b border-slate-200">
                                         <p className="text-xs font-semibold text-slate-500">P. Compra (u)</p>
-                                        <p className="text-lg font-semibold text-slate-800">S/ {level.purchasePrice.toFixed(2)}</p>
+                                        <p className="text-lg font-semibold text-slate-800">S/ {(level.purchasePrice ?? 0).toFixed(2)}</p>
                                       </div>
                                       )}
                                       <div className="flex justify-between items-center pb-3 border-b border-slate-200">
                                         <p className="text-xs font-semibold text-slate-500">P. Venta (u)</p>
-                                        <p className="text-lg font-semibold text-slate-800">S/ {level.salePrice.toFixed(2)}</p>
+                                        <p className="text-lg font-semibold text-slate-800">S/ {(level.salePrice ?? 0).toFixed(2)}</p>
                                       </div>
                                       {userRole === 'admin' && (
                                       <div className="flex justify-between items-center">
@@ -8099,7 +8099,7 @@ const Index = () => {
                   <div style={{ gridTemplateColumns: `repeat(${sortedLevels.length}, 1fr)` }} className="grid gap-6">
                     {sortedLevels.map((level, idx) => {
                       const color = colors[idx % colors.length];
-                      const gananciaPorUnidad = level.salePrice - level.purchasePrice;
+                      const gananciaPorUnidad = (level.salePrice ?? 0) - (level.purchasePrice ?? 0);
                       return (
                         <div key={level.id} className={`bg-white border ${color.border} rounded-xl overflow-hidden shadow-sm`}>
                           <div className={`${color.headerBg} px-4 py-3 border-b ${color.border}`}>
@@ -8115,12 +8115,12 @@ const Index = () => {
                               {userRole === 'admin' && (
                               <div className="flex justify-between items-center text-xs">
                                 <p className="text-slate-500">P. Compra</p>
-                                <p className="font-semibold text-slate-800">S/ {level.purchasePrice.toFixed(2)}</p>
+                                <p className="font-semibold text-slate-800">S/ {(level.purchasePrice ?? 0).toFixed(2)}</p>
                               </div>
                               )}
                               <div className="flex justify-between items-center text-xs">
                                 <p className="text-slate-500">P. Venta</p>
-                                <p className="font-semibold text-blue-600">S/ {level.salePrice.toFixed(2)}</p>
+                                <p className="font-semibold text-blue-600">S/ {(level.salePrice ?? 0).toFixed(2)}</p>
                               </div>
                             </div>
                             {userRole === 'admin' && (
@@ -8935,10 +8935,10 @@ const Index = () => {
                                     {lvl.baseUnitsContained} unid.
                                   </TableCell>
                                   <TableCell className="py-2 text-xs text-blue-700 font-medium">
-                                    S/ {lvl.purchasePrice.toFixed(2)}
+                                    S/ {(lvl.purchasePrice ?? 0).toFixed(2)}
                                   </TableCell>
                                   <TableCell className="py-2 text-xs text-green-700 font-medium">
-                                    S/ {lvl.salePrice.toFixed(2)}
+                                    S/ {(lvl.salePrice ?? 0).toFixed(2)}
                                   </TableCell>
                                   <TableCell className="py-2 text-xs font-bold">
                                     {(() => {
@@ -9239,8 +9239,8 @@ const Index = () => {
           <div className="space-y-4">
             {currentStockHistoryProduct && (
               <div className="space-y-4">
-                  {currentStockHistoryProduct.type === 'mayorista' ? (
-                  // Modal para productos mayoristas
+                  {currentStockHistoryProduct.type === 'mayorista' && (currentStockHistoryProduct.saleLevels?.some(l => l.name === 'Unidad')) === false ? (
+                  // Modal para productos mayoristas (Modelo B: cada nivel tiene su propio stock)
                   <div className="space-y-4">
 
 
@@ -9249,7 +9249,7 @@ const Index = () => {
                       <div className="space-y-2">
                         <Label className="text-sm font-medium">Mostrar historial de:</Label>
                         <div className="flex flex-wrap gap-2">
-                        {currentStockHistoryProduct.saleLevels?.sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
+                        {[...(currentStockHistoryProduct.saleLevels || [])].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
                           <Button
                             key={level.id}
                             variant={selectedHistoryLevel === level.name ? "default" : "outline"}
@@ -9290,7 +9290,7 @@ const Index = () => {
                           <div className="space-y-2">
                             <Label className="text-sm font-medium">Nivel</Label>
                             <div className="flex flex-wrap gap-2">
-                              {currentStockHistoryProduct.saleLevels?.sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
+                              {[...(currentStockHistoryProduct.saleLevels || [])].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
                                 <Button
                                   key={level.id}
                                   variant={selectedMayoristaRestockLevel === level.name ? "default" : "outline"}
@@ -9470,7 +9470,7 @@ const Index = () => {
                           </TableHeader>
                           <TableBody>
                             {(() => {
-                              const productHistory = modalProductHistory
+                              const productHistory = [...modalProductHistory]
                                 .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
                               if (!selectedHistoryLevel) {
@@ -9691,7 +9691,7 @@ const Index = () => {
                             </p>
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
-                            {currentStockHistoryProduct.type !== 'mayorista' && (
+                            {(currentStockHistoryProduct.type !== 'mayorista' || (currentStockHistoryProduct.saleLevels?.some(l => l.name === 'Unidad'))) && (
                               <Button
                                 variant="outline"
                                 className="border-slate-300 bg-white text-slate-800 hover:bg-slate-100"
@@ -9724,7 +9724,7 @@ const Index = () => {
                             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                               <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Precio de Compra por Kg</p>
                               <p className="text-xl font-bold text-indigo-600">
-                                S/ {currentStockHistoryProduct.purchasePrice.toFixed(2)}
+                                S/ {(currentStockHistoryProduct.purchasePrice ?? 0).toFixed(2)}
                               </p>
                             </div>
                           </div>
@@ -9732,12 +9732,12 @@ const Index = () => {
                       </div>
                     </div>
 
-                    {showStockRestockForm && currentStockHistoryProduct.type !== 'mayorista' && (
+                    {showStockRestockForm && (currentStockHistoryProduct.type !== 'mayorista' || (currentStockHistoryProduct.saleLevels?.some(l => l.name === 'Unidad'))) && (
                       <div className="rounded-xl border border-stone-200 bg-stone-50 p-4">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <div className="space-y-2">
                             <Label htmlFor="stockHistoryRestockQuantity">
-                              {currentStockHistoryProduct.type === 'peso' ? 'Cantidad (gramos)' : 'Cantidad'}
+                              {currentStockHistoryProduct.type === 'peso' ? 'Cantidad (gramos)' : currentStockHistoryProduct.type === 'mayorista' ? 'Cantidad (unidades)' : 'Cantidad'}
                             </Label>
                             <Input
                               id="stockHistoryRestockQuantity"
@@ -9861,11 +9861,11 @@ const Index = () => {
           </DialogHeader>
 
           <div className="space-y-3">
-            {currentStockHistoryProduct?.type === 'mayorista' && (
+            {currentStockHistoryProduct?.type === 'mayorista' && (currentStockHistoryProduct.saleLevels?.some(l => l.name === 'Unidad')) === false && (
               <div className="space-y-2">
                 <Label className="text-sm font-medium">Eliminar historial de:</Label>
                 <div className="flex flex-wrap gap-2">
-                  {currentStockHistoryProduct.saleLevels?.sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
+                  {[...(currentStockHistoryProduct.saleLevels || [])].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; }).map((level) => (
                     <Button
                       key={level.id}
                       variant={selectedHistoryLevel === level.name ? "destructive" : "outline"}
