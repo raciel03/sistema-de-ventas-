@@ -228,3 +228,14 @@ cd caja-magica-ventas-main-app && npm run dev
 - **Fix (líneas ~2425-2435, solo rama `previewMode`):** el CSS ahora se delimita con la clase `.boleta-preview` (cada regla se antepone `.boleta-preview `, la regla `body` se omite porque el contenedor ya trae los estilos base por inline y el centrado lo hace el wrapper `maxWidth:520px; margin:0 auto`). El ticket se ve idéntico; la página de atrás ya no se contamina.
 - **NO afecta impresión:** por navegador (`window.open`, 2450) y QZ Tray (2489) usan `previewMode=false` → documento aparte, sin cambios. Único llamador de preview: `viewBoleta` (4053).
 - **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK.
+
+### 🏷️ Badges de tipo en ventas: nueva columna "Tipo" + "Unidad Simple" teal (31/07/2026)
+- **Pedido:** en el modal Ventas del Día, las ventas de **unidad simple** y **peso** no mostraban ningún badge en la tabla (los badges de tipo se amontonaban con el método de pago y solo existían "Unidad" azul = mayorista y "Mayorista" rosa). Se pidió separarlos en su propia columna y diferenciar la unidad simple del "Unidad" de mayorista.
+- **Cambio 1 — Tabla "Ventas de Hoy" (líneas ~5286-5332):** nueva columna **"Tipo"** entre "Pago" y "Total". La celda "Pago" queda SOLO con el badge del método de pago. La celda "Tipo" muestra los 4 badges por fila (`flex flex-wrap gap-1.5`):
+  - `selectedLevelName === 'Unidad'` → azul **"Unidad"** (mayorista Modelo A)
+  - `type === 'mayorista' || (selectedLevelName && selectedLevelName !== 'Unidad')` → rosa **"Mayorista"**
+  - `type === 'unidad' && !selectedLevelName` → teal **"Unidad Simple"** (`bg-teal-100 text-teal-700 border-teal-200`) — NUEVO
+  - `type === 'peso'` → ámbar **"Peso"** (`bg-amber-100 text-amber-700 border-amber-200`) — NUEVO
+- **Cambio 2 — Modal Cerrar Caja (líneas ~6416-6442):** `hasUnidad` ahora es SOLO `selectedLevelName === 'Unidad'` (antes incluía la unidad simple, mezclando ambos en azul); nueva const `hasUnidadSimple` con badge teal. "Peso" (ámbar) ya existía ahí.
+- **No se tocó:** modal Detalle de Venta (ya distinguía: mayorista→rosa, regular→azul, peso→ámbar), filtros ni lógica de negocio/datos.
+- **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK. En la otra PC: **Ctrl+Shift+R**.

@@ -5286,6 +5286,7 @@ const Index = () => {
                           <TableHead className="border-r">Hora</TableHead>
                           <TableHead className="border-r">ID Venta</TableHead>
                           <TableHead className="border-r">Pago</TableHead>
+                          <TableHead className="border-r">Tipo</TableHead>
                           <TableHead className="border-r text-right">Total</TableHead>
                           {userRole === 'admin' && <TableHead className="border-r text-right">Ganancia</TableHead>}
                           <TableHead className="text-right">Acciones</TableHead>
@@ -5301,10 +5302,12 @@ const Index = () => {
                               {sale.id}
                             </TableCell>
                             <TableCell className="border-r">
-                              <div className="flex items-center gap-2">
-                                <Badge variant="outline" className={`text-[10px] font-normal capitalize ${getPaymentMethodColor(sale.paymentMethod)}`}>
-                                  {sale.paymentMethod}
-                                </Badge>
+                              <Badge variant="outline" className={`text-[10px] font-normal capitalize ${getPaymentMethodColor(sale.paymentMethod)}`}>
+                                {sale.paymentMethod}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="border-r">
+                              <div className="flex flex-wrap items-center gap-1.5">
                                 {sale.items.some(item => item.selectedLevelName === 'Unidad') && (
                                   <Badge className="text-[9px] bg-blue-100 text-blue-700 border-blue-200">
                                     Unidad
@@ -5313,6 +5316,16 @@ const Index = () => {
                                 {sale.items.some(item => item.product.type === 'mayorista' || (item.selectedLevelName && item.selectedLevelName !== 'Unidad')) && (
                                   <Badge className="text-[9px] bg-pink-100 text-pink-700 border-pink-200">
                                     Mayorista
+                                  </Badge>
+                                )}
+                                {sale.items.some(item => item.product.type === 'unidad' && !item.selectedLevelName) && (
+                                  <Badge className="text-[9px] bg-teal-100 text-teal-700 border-teal-200">
+                                    Unidad Simple
+                                  </Badge>
+                                )}
+                                {sale.items.some(item => item.product.type === 'peso') && (
+                                  <Badge className="text-[9px] bg-amber-100 text-amber-700 border-amber-200">
+                                    Peso
                                   </Badge>
                                 )}
                               </div>
@@ -6400,7 +6413,8 @@ const Index = () => {
                     }
                     
                     return filteredDaysSales.map((sale) => {
-                      const hasUnidad = sale.items.some(item => item.selectedLevelName === 'Unidad' || (item.product.type === 'unidad' && !item.selectedLevelName));
+                      const hasUnidad = sale.items.some(item => item.selectedLevelName === 'Unidad');
+                      const hasUnidadSimple = sale.items.some(item => item.product.type === 'unidad' && !item.selectedLevelName);
                       const hasMayorista = sale.items.some(item => item.product.type === 'mayorista' || (item.selectedLevelName && item.selectedLevelName !== 'Unidad'));
                       const hasPeso = sale.items.some(item => item.product.type === 'peso');
                       return (
@@ -6419,6 +6433,11 @@ const Index = () => {
                               {hasUnidad && (
                                 <Badge className="bg-blue-100 text-blue-700 border-blue-200 text-[10px]">
                                   Unidad
+                                </Badge>
+                              )}
+                              {hasUnidadSimple && (
+                                <Badge className="bg-teal-100 text-teal-700 border-teal-200 text-[10px]">
+                                  Unidad Simple
                                 </Badge>
                               )}
                               {hasMayorista && (
