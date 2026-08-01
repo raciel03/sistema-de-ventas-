@@ -8095,13 +8095,18 @@ const Index = () => {
                 </div>
 
                 {/* Row 2: All levels in CSS grid with fixed columns (only for hasUnidad) */}
-                {hasUnidad && (
-                  <div style={{ gridTemplateColumns: `repeat(${sortedLevels.length}, 1fr)` }} className="grid gap-6">
+                {hasUnidad && (() => {
+                  const overflow = sortedLevels.length > 4;
+                  return (
+                  <div
+                    className={overflow ? "flex flex-wrap justify-center gap-6" : "grid gap-6"}
+                    style={overflow ? undefined : { gridTemplateColumns: `repeat(${sortedLevels.length}, 1fr)` }}
+                  >
                     {sortedLevels.map((level, idx) => {
                       const color = colors[idx % colors.length];
                       const gananciaPorUnidad = (level.salePrice ?? 0) - (level.purchasePrice ?? 0);
                       return (
-                        <div key={level.id} className={`bg-white border ${color.border} rounded-xl overflow-hidden shadow-sm`}>
+                        <div key={level.id} className={`bg-white border ${color.border} rounded-xl overflow-hidden shadow-sm ${overflow ? 'w-[calc(25%_-_1.125rem)]' : ''}`}>
                           <div className={`${color.headerBg} px-4 py-3 border-b ${color.border}`}>
                             <div className="flex justify-between items-center">
                               <h4 className="text-sm font-bold text-slate-800">{level.name}</h4>
@@ -8137,7 +8142,8 @@ const Index = () => {
                       );
                     })}
                   </div>
-                )}
+                  );
+                })()}
 
                 {/* Row 3: VENTAS POR RESTOK (only for hasUnidad) */}
                 {userRole === 'admin' && hasUnidad && (() => {

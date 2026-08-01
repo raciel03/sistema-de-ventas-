@@ -216,3 +216,8 @@ cd caja-magica-ventas-main-app && npm run dev
   - El diálogo "Eliminar historial" también oculta los botones por nivel para Modelo A (línea ~9864).
 - **NO era regresión:** el formulario por niveles en Historial existía desde el commit inicial (verificado con `git log -S`) y los fixes anteriores no lo tocaban.
 - **Verificación:** `npx tsc --noEmit` + `npm run build` + `firebase deploy --only hosting` OK. En la otra PC: **Ctrl+Shift+R** y probar: editar mayorista con nivel "Paquete" → tocar "Agregar Nivel"; historial de un mayorista Modelo A (restock en unidades) y Modelo B (por nivel).
+
+### 🎨 Cambio estético: tarjetas de niveles en modal "Información de producto" (31/07/2026)
+- **Pedido:** en el modal "Ver Producto Mayorista" (título "Información de producto"), la fila de tarjetas de niveles (Modelo A / hasUnidad) usaba `grid-template-columns: repeat(N, 1fr)` → TODOS los niveles en UNA fila (muy angostos con 5+).
+- **Fix (líneas ~8097-8146, solo layout):** si hay **>4 niveles** → contenedor pasa a `flex flex-wrap justify-center gap-6` y cada tarjeta recibe `w-[calc(25%_-_1.125rem)]` → máximo 4 por fila y la fila sobrante queda **centrada** (2 niveles nuevos caen debajo de los 2 del centro). Si hay **≤4 niveles** → queda EXACTAMENTE como hoy (grid `repeat(N, 1fr)` estirado).
+- **100% estético:** no toca lógica, datos, ventas ni stock. Verificado con `npx tsc --noEmit` + build + deploy OK.
