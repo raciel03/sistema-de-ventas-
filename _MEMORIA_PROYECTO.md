@@ -248,3 +248,9 @@ cd caja-magica-ventas-main-app && npm run dev
   - Mayorista (rosa) y Peso (ámbar) → sin cambios
 - **Boleta intacta:** la boleta (impresión/QZ) la genera `generarBoletaHTML` (línea 2302) con HTML propio e independiente; este badge JSX no la toca. Verificado que esa función no contiene "Unidad Simple".
 - **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK. En la otra PC: **Ctrl+Shift+R**.
+
+### 📊 Tarjeta "Total de Ventas" en Ventas del Día (31/07/2026)
+- **Pedido:** agregar una tarjeta con el conteo total de ventas del día, junto a "Prods Vendidos".
+- **Cambio (líneas ~5157 y ~5210-5219, solo JSX):** el grid de tarjetas pasó de `lg:grid-cols-4` → `lg:grid-cols-5` y se agregó la tarjeta **"Total de Ventas"** (ícono `ShoppingCart`, barra azul `sky`, muestra `todaysSales.length`) justo después de "Prods Vendidos".
+- **Nota:** "Total de Ventas" muestra el mismo número que "Ventas Hoy" (`todaysSales.length`); fue lo que pidió el usuario.
+- **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK.

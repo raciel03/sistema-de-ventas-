@@ -5154,7 +5154,7 @@ const Index = () => {
           </TabsContent>
 
           <TabsContent value="ventas-dia" className="space-y-4 sm:space-y-6">
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
               <Card className="bg-white border-slate-100 shadow-sm overflow-hidden group">
                 <div className="h-1 w-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity" />
                 <CardContent className="p-3 sm:p-4">
@@ -5204,6 +5204,16 @@ const Index = () => {
                         return item.product.type === 'peso' ? itemSum + 1 : itemSum + item.quantity;
                       }, 0), 0)}
                     </p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="bg-white border-slate-100 shadow-sm overflow-hidden group">
+                <div className="h-1 w-full bg-sky-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                <CardContent className="p-3 sm:p-4">
+                  <div className="text-center">
+                    <ShoppingCart className="w-6 h-6 sm:w-8 sm:h-8 mx-auto mb-1 sm:mb-2 text-sky-600" />
+                    <p className="text-[10px] sm:text-xs text-slate-500 font-bold uppercase tracking-widest">Total de Ventas</p>
+                    <p className="text-lg sm:text-2xl font-black text-slate-900">{todaysSales.length}</p>
                   </div>
                 </CardContent>
               </Card>
