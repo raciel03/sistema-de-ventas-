@@ -221,3 +221,10 @@ cd caja-magica-ventas-main-app && npm run dev
 - **Pedido:** en el modal "Ver Producto Mayorista" (título "Información de producto"), la fila de tarjetas de niveles (Modelo A / hasUnidad) usaba `grid-template-columns: repeat(N, 1fr)` → TODOS los niveles en UNA fila (muy angostos con 5+).
 - **Fix (líneas ~8097-8146, solo layout):** si hay **>4 niveles** → contenedor pasa a `flex flex-wrap justify-center gap-6` y cada tarjeta recibe `w-[calc(25%_-_1.125rem)]` → máximo 4 por fila y la fila sobrante queda **centrada** (2 niveles nuevos caen debajo de los 2 del centro). Si hay **≤4 niveles** → queda EXACTAMENTE como hoy (grid `repeat(N, 1fr)` estirado).
 - **100% estético:** no toca lógica, datos, ventas ni stock. Verificado con `npx tsc --noEmit` + build + deploy OK.
+
+### 🐛 Fix vista previa de boleta: el fondo "se juntaba todo" (31/07/2026)
+- **Problema:** al presionar "Ver Boleta" en Ventas del día, mientras la "Vista previa de Boleta" estaba abierta todo el contenido de la página perdía espaciado ("se junta todo"); al cerrarla volvía a la normalidad.
+- **Causa:** `generarBoletaHTML` en modo `previewMode` inyectaba `<style>${css}</style>` vía `dangerouslySetInnerHTML`. Ese `<style>` incluía reglas GLOBALES: `* { margin: 0; padding: 0; box-sizing: border-box; }` y `body { font-size: 10px; padding: 3mm 2mm; ... }` → aplicaban a TODA la app mientras el modal estaba abierto. Al cerrar, React quitaba el `dangerouslySetInnerHTML` (y su `<style>`) → todo volvía a la normalidad.
+- **Fix (líneas ~2425-2435, solo rama `previewMode`):** el CSS ahora se delimita con la clase `.boleta-preview` (cada regla se antepone `.boleta-preview `, la regla `body` se omite porque el contenedor ya trae los estilos base por inline y el centrado lo hace el wrapper `maxWidth:520px; margin:0 auto`). El ticket se ve idéntico; la página de atrás ya no se contamina.
+- **NO afecta impresión:** por navegador (`window.open`, 2450) y QZ Tray (2489) usan `previewMode=false` → documento aparte, sin cambios. Único llamador de preview: `viewBoleta` (4053).
+- **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK.

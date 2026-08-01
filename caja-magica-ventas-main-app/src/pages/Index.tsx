@@ -2423,7 +2423,15 @@ const Index = () => {
   `;
 
     if (previewMode) {
-      return `<style>${css}</style><div style="font-family:'Segoe UI',Arial,Helvetica,sans-serif;font-size:10px;line-height:1.4;padding:3mm 2mm">${bodyContent}</div>`;
+      const scopedCss = css
+        .split('\n')
+        .map(line => {
+          const l = line.trim();
+          if (!l || l.startsWith('body')) return '';
+          return '.boleta-preview ' + l;
+        })
+        .join('\n');
+      return `<style>${scopedCss}</style><div class="boleta-preview" style="font-family:'Segoe UI',Arial,Helvetica,sans-serif;font-size:10px;line-height:1.4;padding:3mm 2mm">${bodyContent}</div>`;
     }
     return `<!DOCTYPE html>
 <html>
