@@ -125,6 +125,7 @@ interface DailyClose {
   };
   closedBy: string;
   closeTime: string;
+  transacciones?: Sale[];
 }
 
 interface StockHistoryItem {
@@ -3634,7 +3635,8 @@ const Index = () => {
         salesCount: todaySales.length,
         paymentMethods,
         closedBy: currentUserName,
-        closeTime: new Date().toISOString()
+        closeTime: new Date().toISOString(),
+        transacciones: todaySales
       };
       updatedCloses = [...dailyCloses];
       updatedCloses[existingCloseIndex] = updatedClose;
@@ -3653,7 +3655,8 @@ const Index = () => {
         salesCount: todaySales.length,
         paymentMethods,
         closedBy: currentUserName,
-        closeTime: new Date().toISOString()
+        closeTime: new Date().toISOString(),
+        transacciones: todaySales
       };
       updatedCloses = [...dailyCloses, dailyClose];
       toast({
@@ -6032,15 +6035,18 @@ const Index = () => {
                       return <div className="text-center p-4">No hay datos disponibles</div>;
                     }
                     
-                    const daysSales = sales.filter(sale => {
-                      try {
-                        const saleDate = (sale.localDate || getLocalDateStr(new Date(sale.date)));
-                        return saleDate === selectedCloseDetail.date;
-                      } catch (error) {
-                        console.error('Error al comparar fechas:', error);
-                        return false;
-                      }
-                    });
+                    const savedTransactions = selectedCloseDetail.transacciones;
+                    const daysSales = savedTransactions && savedTransactions.length > 0
+                      ? savedTransactions
+                      : sales.filter(sale => {
+                          try {
+                            const saleDate = (sale.localDate || getLocalDateStr(new Date(sale.date)));
+                            return saleDate === selectedCloseDetail.date;
+                          } catch (error) {
+                            console.error('Error al comparar fechas:', error);
+                            return false;
+                          }
+                        });
                     
                     const productSummary: {
                       [key: string]: {
@@ -6396,15 +6402,18 @@ const Index = () => {
                       return <div className="text-center p-4">No hay datos disponibles</div>;
                     }
                     
-                    const daysSales = sales.filter(sale => {
-                      try {
-                        const saleDate = (sale.localDate || getLocalDateStr(new Date(sale.date)));
-                        return saleDate === selectedCloseDetail.date;
-                      } catch (error) {
-                        console.error('Error al comparar fechas:', error);
-                        return false;
-                      }
-                    });
+                    const savedTransactions = selectedCloseDetail.transacciones;
+                    const daysSales = savedTransactions && savedTransactions.length > 0
+                      ? savedTransactions
+                      : sales.filter(sale => {
+                          try {
+                            const saleDate = (sale.localDate || getLocalDateStr(new Date(sale.date)));
+                            return saleDate === selectedCloseDetail.date;
+                          } catch (error) {
+                            console.error('Error al comparar fechas:', error);
+                            return false;
+                          }
+                        });
                     
                     const filteredDaysSales = daysSales.filter(sale => {
                       if (transaccionesFilter === 'regular') return sale.items.some(item => item.product.type !== 'mayorista' && (!item.selectedLevelName || item.selectedLevelName === 'Unidad'));

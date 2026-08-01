@@ -16,6 +16,7 @@ export interface DailyClose {
   };
   closedBy: string;
   closeTime: string;
+  transacciones?: any[];
 }
 
 const COLLECTION = 'daily-closes';

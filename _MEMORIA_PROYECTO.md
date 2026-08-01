@@ -254,3 +254,15 @@ cd caja-magica-ventas-main-app && npm run dev
 - **Cambio (líneas ~5157 y ~5210-5219, solo JSX):** el grid de tarjetas pasó de `lg:grid-cols-4` → `lg:grid-cols-5` y se agregó la tarjeta **"Total de Ventas"** (ícono `ShoppingCart`, barra azul `sky`, muestra `todaysSales.length`) justo después de "Prods Vendidos".
 - **Nota:** "Total de Ventas" muestra el mismo número que "Ventas Hoy" (`todaysSales.length`); fue lo que pidió el usuario.
 - **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK.
+
+### 💾 Fix: cierre de caja guarda snapshot de las ventas (01/08/2026)
+- **Problema:** tras "Cerrar Caja" y borrar las ventas del día con el botón "Limpiar" (`confirmClearTodaySales`), los modales **"Transacciones"** y **"Resumen por Producto"** del Historial salían vacíos. El cierre solo guardaba el resumen (totales/ganancias/métodos de pago), NO las ventas individuales; esos modales reconstruían la lista filtrando las ventas VIVAS (`sales.filter`), que ya no existían. El resumen del cierre sí se veía porque está en el registro.
+- **No era regresión:** `cerrarCaja` y `confirmClearTodaySales` existen desde el commit inicial; los últimos 8 commits fueron solo visuales. "Funcionaba antes" porque no se borraban las ventas tras cerrar.
+- **Fix (archivo `Index.tsx` y `src/firebase/dailyCloseService.ts`):**
+  - Interfaz `DailyClose` (Index.tsx ~113 y dailyCloseService.ts ~4): nuevo campo opcional `transacciones?: Sale[]` (en el service `any[]`).
+  - `cerrarCaja` (~3591): ambas ramas (crear y actualizar) ahora guardan `transacciones: todaySales` → snapshot fiel del día dentro del cierre.
+  - Modales "Transacciones" (~6405) y "Resumen por Producto" (~6038): usan `selectedCloseDetail.transacciones` si existe (y no está vacío); si no (cierres viejos sin el campo), caen al `sales.filter` de siempre.
+  - `syncClosesToFirestore` (650) y el sync pendiente offline ya escriben el objeto completo → sin cambios.
+- **Peso estimado:** 1 venta ≈ 1 KB; 20 ventas ≈ 35-40 KB (límite Firestore 1MB/doc ≈ 4%). `pos-daily-closes` (29 cierres) pasaría a ~1-1.5 MB (límite localStorage 5MB). Sin riesgo para el volumen actual.
+- **Retrocompatibilidad:** cierres creados ANTES del fix no tienen el snapshot (esa data ya se borró y no se recupera); el fix protege los cierres nuevos.
+- **Verificación:** `npx tsc --noEmit` + build OK + `firebase deploy --only hosting` OK.
