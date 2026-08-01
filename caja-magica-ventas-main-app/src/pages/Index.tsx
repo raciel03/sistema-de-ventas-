@@ -9048,7 +9048,7 @@ const Index = () => {
                       </div>
                       {!newMayoristaLevels.some(l => l.name === 'Unidad') && (
                       <div>
-                        <Label className="text-[10px]">Stock {newLevelDropdown !== 'Personalizado' ? `(${newLevelDropdown}s)` : ''}</Label>
+                        <Label className="text-[10px]">Stock {newLevelDropdown !== 'Personalizado' && newLevelDropdown ? `(${newLevelDropdown}s)` : ''}</Label>
                         <Input
                           type="text"
                           placeholder="0"
@@ -9112,7 +9112,7 @@ const Index = () => {
                               initialStock: isUnidad ? stockQty : (newMayoristaLevels.some(l => l.name === 'Unidad') ? 0 : stockQty)
                             };
                             setNewMayoristaLevels([...newMayoristaLevels, newLvl]);
-                            setNewLevelDropdown('Paquete');
+                            setNewLevelDropdown('');
                             setNewLevelCustomName('');
                             setNewLevelContains('');
                             setNewLevelPurchasePrice('');

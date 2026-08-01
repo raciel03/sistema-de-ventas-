@@ -196,3 +196,11 @@ cd caja-magica-ventas-main-app && npm run dev
   ```
 - El diálogo del navegador se deja igual (`80mm auto` + portrait) → sigue vertical y se adapta al largo según lo vendido (NO se fija altura para no dejar espacio vacío).
 - **Verificación:** tsc sin errores + build + deploy OK.
+
+### 🐛 Fix crash mayorista "removeChild" (mismo día): dropdown de niveles quedaba con valor inexistente
+- **Problema (solo se veía en la otra PC, build de producción):** al agregar un producto mayorista, si se agregaba el nivel **Unidad** y luego **Paquete**, la página crasheaba con `Error al iniciar: Failed to execute 'removeChild' on 'Node': The node to be removed is not a child of this node.`
+- **Causa:** en el modal "Agregar producto" → "Agregar Nuevo Nivel", tras agregar un nivel el código hacía `setNewLevelDropdown('Paquete')` (línea 9115). Si ya se habían agregado Unidad + Paquete, el `Select` quedaba apuntando a `'Paquete'`, pero la opción ya estaba **filtrada** de la lista (línea 9003). Ese valor sin item coincidente dispara un race interno de Radix Select al abrir/cerrar el menú → error `removeChild` → pantalla blanca en producción (intermitente, por eso "solo en la otra PC": build de producción + orden de clics Unidad→Paquete→tocar menú; en dev con overlay y distinto timing no se notaba).
+- **Fix (línea 9115):** `setNewLevelDropdown('')` en vez de `'Paquete'` (mismo patrón seguro que ya usaba el modal de **editar**, línea 7649). El menú muestra placeholder "Elige un nivel..." y el valor SIEMPRE existe entre las opciones → el crash desaparece en ambas PCs.
+- **Detalle cosmético (línea 9051):** la etiqueta "Stock (...)" solo muestra el nombre del nivel si hay dropdown seleccionado (evita "Stock ()").
+- **Confirma NO regresión:** la línea 9115 no se tocaba desde el commit inicial (35c8a93) — verificado con `git log`. No es una regresión de los fixes anteriores (impresión/sync/usuarios tocan otras líneas).
+- **Verificación:** `npx tsc --noEmit` + build + `firebase deploy --only hosting` OK. En la otra PC: recargar con **Ctrl+Shift+R** para descartar bundle cacheado.
