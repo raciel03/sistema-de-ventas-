@@ -4,7 +4,6 @@ import { db } from './config';
 export interface UserProfile {
   uid: string;
   email: string;
-  username: string;
   name: string;
   role: 'admin' | 'empleado';
   createdAt: string;
@@ -35,14 +34,6 @@ export const deleteUserProfile = async (uid: string) => {
 export const getAllUsers = async (): Promise<UserProfile[]> => {
   const snap = await getDocs(collection(db, COLLECTION));
   return snap.docs.map(d => ({ uid: d.id, ...d.data() } as UserProfile));
-};
-
-export const getUserByUsername = async (username: string): Promise<UserProfile | null> => {
-  const q = query(collection(db, COLLECTION), where('username', '==', username));
-  const snap = await getDocs(q);
-  if (snap.empty) return null;
-  const d = snap.docs[0];
-  return { uid: d.id, ...d.data() } as UserProfile;
 };
 
 export const getUserByEmail = async (email: string): Promise<UserProfile | null> => {

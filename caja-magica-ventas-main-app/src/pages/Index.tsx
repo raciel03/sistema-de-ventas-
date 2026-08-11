@@ -54,6 +54,8 @@ import {
   Settings,
   CloudUpload,
   RefreshCw,
+  CheckCircle2,
+  Mail,
   X
 } from "lucide-react";
 
@@ -161,7 +163,6 @@ interface StockHistoryDisplayRow {
 
 interface AppUser {
   id: string;
-  username: string;
   password: string;
   email: string;
   role: 'admin' | 'empleado';
@@ -334,6 +335,7 @@ const Index = () => {
   const [isVentasIndividualesOpen, setIsVentasIndividualesOpen] = useState(false);
   const [showIndividualSales, setShowIndividualSales] = useState(false);
   const [editingUser, setEditingUser] = useState<AppUser | null>(null);
+  const [viewUser, setViewUser] = useState<AppUser | null>(null);
   const [addProductMode, setAddProductMode] = useState<'unidad' | 'peso' | 'mayorista'>('unidad');
   const [newWeightProduct, setNewWeightProduct] = useState({ name: "", purchasePrice: 0, salePrice: 0, purchasePricePerKg: 0, salePricePerKg: 0, equivalentGrams: 0, stock: 0, initialStock: 0, minWeightGrams: 0, category: "" });
   // Manejo de input como string para permitir ceros y decimales (e.g., "0.020")
@@ -606,7 +608,6 @@ const Index = () => {
 
   // Estados para agregar usuarios
   const [newUser, setNewUser] = useState({
-    username: '',
     password: '',
     email: '',
     name: '',
@@ -1703,7 +1704,6 @@ const Index = () => {
       if (!profile) {
         const newProfile: Omit<UserProfile, 'uid'> = {
           email: userEmail,
-          username: registeredUser.username || userEmail.split('@')[0],
           name: registeredUser.name,
           role: registeredUser.role,
           createdAt: new Date().toISOString(),
@@ -3382,15 +3382,6 @@ const Index = () => {
       }
     }
 
-    if (users.some(u => u.username === newUser.username)) {
-      toast({
-        title: "Usuario existente",
-        description: "Este nombre de usuario ya existe",
-        variant: "destructive"
-      });
-      return;
-    }
-
     if (users.some(u => u.email === newUser.email)) {
       toast({
         title: "Correo existente",
@@ -3399,8 +3390,6 @@ const Index = () => {
       });
       return;
     }
-
-    const userUsername = newUser.username || newUser.email.split('@')[0];
 
     // Validar campos antes de enviar
     const errors: Record<string, string> = {};
@@ -3423,7 +3412,6 @@ const Index = () => {
 
         await createUserProfile(fbUid, {
           email: newUser.email,
-          username: userUsername,
           name: newUser.name,
           role: 'empleado',
           createdAt: new Date().toISOString(),
@@ -3432,7 +3420,6 @@ const Index = () => {
 
         usuario = {
           id: fbUid,
-          username: userUsername,
           password: await hashPassword(newUser.password),
           email: newUser.email,
           name: newUser.name,
@@ -3450,7 +3437,6 @@ const Index = () => {
         fbUid = await createUserWithoutSignIn(newUser.email, newUser.password || 'admin');
         await createUserProfile(fbUid, {
           email: newUser.email,
-          username: userUsername,
           name: newUser.name,
           role: 'admin',
           createdAt: new Date().toISOString(),
@@ -3460,7 +3446,6 @@ const Index = () => {
         const adminHashedPassword = await hashPassword(adminPassword);
         usuario = {
           id: fbUid,
-          username: userUsername,
           password: adminHashedPassword,
           email: newUser.email,
           name: newUser.name,
@@ -3475,7 +3460,7 @@ const Index = () => {
         syncUsersToFirestore(updatedUsers);
       }
 
-      setNewUser({ username: '', password: '', name: '', role: 'empleado', email: '' });
+      setNewUser({ password: '', name: '', role: 'empleado', email: '' });
       setConfirmPassword('');
       setShowPassword(false);
       setShowConfirmPassword(false);
@@ -3484,7 +3469,7 @@ const Index = () => {
       
       toast({
         title: "Usuario agregado",
-        description: `${newUser.role === 'admin' ? 'Administrador' : 'Usuario'} ${usuario?.username} creado exitosamente`,
+        description: `${newUser.role === 'admin' ? 'Administrador' : 'Usuario'} ${usuario?.name} creado exitosamente`,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Error al crear usuario";
@@ -3493,7 +3478,7 @@ const Index = () => {
   };
 
   const editarUsuario = (user: AppUser) => {
-    setEditingUser(user);
+    setEditingUser({ ...user, password: '' });
     setIsEditUserOpen(true);
   };
 
@@ -3519,7 +3504,6 @@ const Index = () => {
       try {
         await updateUserProfile(editingUser.firebaseUid, {
           name: editingUser.name,
-          username: editingUser.username,
           role: editingUser.role,
         });
       } catch (err: unknown) {
@@ -4176,6 +4160,9 @@ const Index = () => {
                   OFFLINE
                 </Badge>
               )}
+              <Badge variant="secondary" className="bg-slate-800 text-slate-100 border-slate-700 hidden sm:flex font-medium px-3 py-1 rounded-full max-w-[180px]">
+                <span className="truncate">{users.find(u => u.email === auth.currentUser?.email)?.name || firebaseUser?.name || 'Usuario'}</span>
+              </Badge>
               <Badge variant="secondary" className="bg-slate-800 text-indigo-400 border-slate-700 hidden sm:flex font-bold px-3 py-1 rounded-full">
                 <User className="w-3 h-3 mr-1.5" />
                 {userRole === 'admin' ? 'ADMINISTRADOR' : 'EMPLEADO'}
@@ -4205,7 +4192,7 @@ const Index = () => {
                   setFirebaseUser(null);
                   setNewProduct({ name: '', purchasePrice: 0, salePrice: 0, stock: 0, category: '' });
                   setNewWeightProduct({ name: "", purchasePricePerKg: 0, salePricePerKg: 0, equivalentGrams: 0, stock: 0, initialStock: 0, minWeightGrams: 0, category: "" });
-                  setNewUser({ username: '', password: '', name: '', role: 'empleado', email: '' });
+      setNewUser({ password: '', name: '', role: 'empleado', email: '' });
                   setConfirmPassword('');
                   setShowPassword(false);
                   setShowConfirmPassword(false);
@@ -5227,28 +5214,28 @@ const Index = () => {
                 <CardTitle className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                   <span className="text-xl font-black text-slate-900 tracking-tight">Ventas de Hoy</span>
                   <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
-                    <div className="flex bg-slate-100 p-1 rounded-lg">
+                    <div className="flex bg-slate-200/50 p-1 rounded-xl">
                       <Button
-                        variant="ghost"
+                        variant={salesFilter === 'all' ? 'secondary' : 'ghost'}
                         size="sm"
                         onClick={() => setSalesFilter('all')}
-                        className={`h-8 rounded-md text-[10px] font-bold uppercase tracking-widest ${salesFilter === 'all' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                        className={`h-8 rounded-lg text-[10px] font-bold uppercase tracking-widest ${salesFilter === 'all' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                       >
                         Todas
                       </Button>
                       <Button
-                        variant="ghost"
+                        variant={salesFilter === 'regular' ? 'secondary' : 'ghost'}
                         size="sm"
                         onClick={() => setSalesFilter('regular')}
-                        className={`h-8 rounded-md text-[10px] font-bold uppercase tracking-widest ${salesFilter === 'regular' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                        className={`h-8 rounded-lg text-[10px] font-bold uppercase tracking-widest ${salesFilter === 'regular' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                       >
                         Regulares
                       </Button>
                       <Button
-                        variant="ghost"
+                        variant={salesFilter === 'mayorista' ? 'secondary' : 'ghost'}
                         size="sm"
                         onClick={() => setSalesFilter('mayorista')}
-                        className={`h-8 rounded-md text-[10px] font-bold uppercase tracking-widest ${salesFilter === 'mayorista' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                        className={`h-8 rounded-lg text-[10px] font-bold uppercase tracking-widest ${salesFilter === 'mayorista' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                       >
                         Mayoristas
                       </Button>
@@ -5465,13 +5452,6 @@ const Index = () => {
                             onChange={(e) => { setNewUser({ ...newUser, name: e.target.value }); setFieldErrors(prev => ({ ...prev, name: '' })); }} />
                         </div>
                         <div className="space-y-2">
-                          <Label>Nombre de Usuario <span className="text-slate-400 text-xs">(opcional)</span></Label>
-                          <Input
-                            placeholder="Ej: juan123"
-                            value={newUser.username}
-                            onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} />
-                        </div>
-                        <div className="space-y-2">
                           <Label>Correo Electrónico</Label>
                           <Input
                             type="email"
@@ -5592,7 +5572,6 @@ const Index = () => {
                       <TableHeader className="sticky top-0 bg-white z-10">
                         <TableRow className="bg-gray-50/50">
                           <TableHead className="border-r">Nombre</TableHead>
-                          <TableHead className="border-r">Usuario</TableHead>
                           <TableHead className="border-r">Correo</TableHead>
                           <TableHead className="border-r">Rol</TableHead>
                           <TableHead className="text-right">Acciones</TableHead>
@@ -5602,7 +5581,6 @@ const Index = () => {
                         {users.map((user) => (
                           <TableRow key={user.id} className="hover:bg-gray-50/50 text-xs sm:text-sm">
                             <TableCell className="font-medium border-r">{user.name}</TableCell>
-                            <TableCell className="border-r">{user.username}</TableCell>
                             <TableCell className="border-r text-gray-500">{user.email || '-'}</TableCell>
                             <TableCell className="border-r">
                               <Badge variant={user.role === 'admin' ? "default" : "secondary"} className="text-[10px] capitalize">
@@ -5611,6 +5589,15 @@ const Index = () => {
                             </TableCell>
                             <TableCell className="text-right">
                               <div className="flex justify-end gap-1">
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-8 w-8 text-slate-600"
+                                  onClick={() => setViewUser(user)}
+                                  title="Ver usuario"
+                                >
+                                  <Eye className="w-4 h-4" />
+                                </Button>
                                 <Button
                                   size="icon"
                                   variant="ghost"
@@ -5624,7 +5611,7 @@ const Index = () => {
                                   variant="ghost"
                                   className="h-8 w-8 text-red-600"
                                   onClick={() => eliminarUsuario(user.id)}
-                                  disabled={user.username === 'admin'}
+                                  disabled={auth.currentUser?.email === user.email}
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </Button>
@@ -5768,28 +5755,28 @@ const Index = () => {
                       }
                     };
                     const itemProfit = getItemProfit();
+                    const typeKey = isMayoristaItem ? 'mayorista' : item.product.type === 'peso' ? 'peso' : !item.selectedLevelName ? 'unidad-simple' : 'unidad';
+                    const palette = {
+                      mayorista: { header: 'bg-pink-100 text-pink-900', badge: 'bg-pink-200 text-pink-800 border-pink-300', total: 'bg-pink-600', border: 'border-pink-200' },
+                      peso: { header: 'bg-amber-100 text-amber-900', badge: 'bg-amber-200 text-amber-800 border-amber-300', total: 'bg-amber-600', border: 'border-amber-200' },
+                      'unidad-simple': { header: 'bg-teal-100 text-teal-900', badge: 'bg-teal-200 text-teal-800 border-teal-300', total: 'bg-teal-600', border: 'border-teal-200' },
+                      unidad: { header: 'bg-blue-100 text-blue-900', badge: 'bg-blue-200 text-blue-800 border-blue-300', total: 'bg-blue-600', border: 'border-blue-200' }
+                    }[typeKey];
 
                     return (
-                      <div key={index} className={`rounded-lg border ${isMayoristaItem ? 'bg-purple-50 border-purple-100' : 'bg-slate-50 border-slate-200'} overflow-hidden shadow-sm`}>
-                          <div className={`flex justify-between items-center px-4 py-3 ${isMayoristaItem ? 'bg-purple-600 text-white' : 'bg-indigo-600 text-white'}`}>
-                          <div className="font-medium flex items-center gap-2">
-                            {item.product.name}
-                            <Badge variant="secondary" className={`text-[10px] ${isMayoristaItem ? 'bg-pink-200 text-pink-800 border-pink-300' : item.product.type === 'peso' ? 'bg-amber-200 text-amber-800 border-amber-300' : !item.selectedLevelName ? 'bg-teal-200 text-teal-800 border-teal-300' : 'bg-blue-200 text-blue-800 border-blue-300'}`}>
+                      <div key={index} className={`rounded-lg border ${palette.border} bg-white overflow-hidden shadow-sm`}>
+                          <div className={`flex justify-between items-center px-4 py-3 ${palette.header}`}>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-bold text-gray-900 truncate">{item.product.name}</span>
+                            <Badge variant="secondary" className={`text-[10px] ${palette.badge}`}>
                               {isMayoristaItem ? 'Mayorista' : item.product.type === 'peso' ? 'Peso' : !item.selectedLevelName ? 'Unidad Simple' : 'Unidad'}
                             </Badge>
                           </div>
-                          {!isMayoristaItem && (
-                            <div className="bg-purple-500 px-3 py-1 rounded-lg">
-                              <p className="font-semibold text-lg">
-                                Total: S/ {itemTotal.toFixed(2)}
-                              </p>
-                            </div>
-                          )}
-                          {isMayoristaItem && (
-                            <p className="font-semibold text-lg">
-                              S/ {itemTotal.toFixed(2)}
+                          <div className={`${palette.total} px-3 py-1 rounded-lg flex-shrink-0`}>
+                            <p className="font-semibold text-lg text-white">
+                              Total: S/ {itemTotal.toFixed(2)}
                             </p>
-                          )}
+                          </div>
                         </div>
                         <div className="p-4">
                           {isMayoristaItem ? (
@@ -5800,7 +5787,7 @@ const Index = () => {
                               <div className="grid grid-cols-2 gap-x-6 gap-y-2 flex-1">
                                 <div>
                                   <p className="text-sm text-gray-600 mb-1">Nivel vendido</p>
-                                  <p className="font-medium text-purple-700">{item.selectedLevelName}</p>
+                                  <p className="font-medium text-gray-900">{item.selectedLevelName}</p>
                                 </div>
                                 <div>
                                   <p className="text-sm text-gray-600 mb-1">Cantidad</p>
@@ -5809,7 +5796,7 @@ const Index = () => {
                                 {isMayoristaItem && (
                                   <div>
                                     <p className="text-sm text-gray-600 mb-1">P. Compra</p>
-                                    <p className="font-medium text-blue-700">S/ {(item.product.purchasePrice || 0).toFixed(2)}</p>
+                                    <p className="font-medium text-gray-900">S/ {(item.product.purchasePrice || 0).toFixed(2)}</p>
                                   </div>
                                 )}
                                 <div>
@@ -5833,7 +5820,7 @@ const Index = () => {
                                 {userRole === 'admin' && (
                                   <div>
                                     <p className="text-sm text-gray-600 mb-1">P. Compra</p>
-                                    <p className="font-medium text-blue-700">
+                                    <p className="font-medium text-gray-900">
                                       S/ {(item.product.purchasePrice || 0).toFixed(2)}
                                     </p>
                                   </div>
@@ -5846,32 +5833,21 @@ const Index = () => {
                                       : `S/ ${(item.product.salePrice || 0).toFixed(2)}`}
                                   </p>
                                 </div>
-                                {userRole === 'admin' && (
-                                  <div>
-                                    <p className="text-sm text-gray-600 mb-1">Ganancia</p>
-                                    <p className="font-bold text-purple-700">S/ {itemProfit.toFixed(2)}</p>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          {userRole === 'admin' && isMayoristaItem && (
-                            <div className="mt-4 bg-green-100 border border-green-300 rounded-lg p-3 flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <Package className="w-5 h-5 text-green-700" />
-                                <span className="text-green-800 font-medium">
-                                  {item.quantity} de {item.product.name} entregado
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-green-800 font-medium">Ganancia: </span>
-                                <span className="text-purple-600 font-bold">
-                                  S/ {itemProfit.toFixed(2)}
-                                </span>
                               </div>
                             </div>
                           )}
                         </div>
+                        {userRole === 'admin' && (
+                          <div className="flex items-center justify-between px-4 py-3 bg-gray-100 border-t border-gray-200">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <CheckCircle2 className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                              <span className="font-medium text-sm text-gray-500 truncate">{item.product.name}</span>
+                            </div>
+                            <Badge variant="secondary" className="bg-green-100 text-green-800 border-green-300 flex-shrink-0">
+                              Ganancia: S/ {itemProfit.toFixed(2)}
+                            </Badge>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -6149,20 +6125,20 @@ const Index = () => {
                       <div className="space-y-4">
                         <div className="flex items-center gap-3">
                           {showSelector && (
-                            <div className="flex bg-slate-100 p-1 rounded-lg w-fit">
+                            <div className="flex bg-slate-200/50 p-1 rounded-xl w-fit">
                               <Button
-                                variant="ghost"
+                                variant={activeTab === 'regular' ? 'secondary' : 'ghost'}
                                 size="sm"
                                 onClick={() => setResumenTab('regular')}
-                                className={`h-8 rounded-md text-xs font-bold uppercase tracking-widest ${activeTab === 'regular' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                className={`h-8 rounded-lg text-xs font-bold uppercase tracking-widest ${activeTab === 'regular' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                               >
                                 Unidad / Peso
                               </Button>
                               <Button
-                                variant="ghost"
+                                variant={activeTab === 'mayorista' ? 'secondary' : 'ghost'}
                                 size="sm"
                                 onClick={() => setResumenTab('mayorista')}
-                                className={`h-8 rounded-md text-xs font-bold uppercase tracking-widest ${activeTab === 'mayorista' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                className={`h-8 rounded-lg text-xs font-bold uppercase tracking-widest ${activeTab === 'mayorista' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                               >
                                 Ventas por Mayor
                               </Button>
@@ -6359,28 +6335,28 @@ const Index = () => {
               <Separator />
 
               <div className="flex items-center gap-3">
-                <div className="flex bg-slate-100 p-1 rounded-lg w-fit">
+                <div className="flex bg-slate-200/50 p-1 rounded-xl w-fit">
                   <Button
-                    variant="ghost"
+                    variant={transaccionesFilter === 'all' ? 'secondary' : 'ghost'}
                     size="sm"
                     onClick={() => setTransaccionesFilter('all')}
-                    className={`h-7 rounded-md text-[10px] font-bold uppercase tracking-widest ${transaccionesFilter === 'all' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    className={`h-7 rounded-lg text-[10px] font-bold uppercase tracking-widest ${transaccionesFilter === 'all' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                   >
                     Todas
                   </Button>
                   <Button
-                    variant="ghost"
+                    variant={transaccionesFilter === 'regular' ? 'secondary' : 'ghost'}
                     size="sm"
                     onClick={() => setTransaccionesFilter('regular')}
-                    className={`h-7 rounded-md text-[10px] font-bold uppercase tracking-widest ${transaccionesFilter === 'regular' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    className={`h-7 rounded-lg text-[10px] font-bold uppercase tracking-widest ${transaccionesFilter === 'regular' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                   >
                     Regulares
                   </Button>
                   <Button
-                    variant="ghost"
+                    variant={transaccionesFilter === 'mayorista' ? 'secondary' : 'ghost'}
                     size="sm"
                     onClick={() => setTransaccionesFilter('mayorista')}
-                    className={`h-7 rounded-md text-[10px] font-bold uppercase tracking-widest ${transaccionesFilter === 'mayorista' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    className={`h-7 rounded-lg text-[10px] font-bold uppercase tracking-widest ${transaccionesFilter === 'mayorista' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                   >
                     Mayoristas
                   </Button>
@@ -6666,20 +6642,15 @@ const Index = () => {
                   onChange={(e) => setEditingUser({ ...editingUser, name: e.target.value })} />
               </div>
               <div>
-                <Label>Nombre de Usuario</Label>
-                <Input
-                  value={editingUser.username}
-                  onChange={(e) => setEditingUser({ ...editingUser, username: e.target.value })} />
-              </div>
-              <div>
-                <Label>Correo Electrónico</Label>
+                <Label>Correo Electrónico <span className="text-slate-400 text-xs">(no editable)</span></Label>
                 <Input
                   type="email"
-                  value={editingUser.email}
-                  onChange={(e) => setEditingUser({ ...editingUser, email: e.target.value })} />
+                  disabled
+                  value={editingUser.email} />
               </div>
               <div>
-                <Label>Nueva Contraseña</Label>
+                <Label>¿Olvidaste tu contraseña? Realiza una nueva aquí</Label>
+                <p className="text-xs text-slate-400 mb-1">Déjala vacía para mantener la actual</p>
                 <div className="relative">
                   <Input
                     type={showEditUserPassword ? "text" : "password"}
@@ -6713,6 +6684,53 @@ const Index = () => {
                 </Select>
               </div>
               <Button onClick={guardarEdicionUsuario} className="w-full">Guardar Cambios</Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={viewUser !== null} onOpenChange={(open) => { if (!open) setViewUser(null); }}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>Información del Usuario</DialogTitle>
+          </DialogHeader>
+          {viewUser && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-4 p-4 bg-slate-50 rounded-xl border">
+                <div className="w-14 h-14 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xl flex-shrink-0 shadow-md">
+                  {viewUser.name.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <p className="font-bold text-gray-900 truncate">{viewUser.name}</p>
+                  <Badge variant={viewUser.role === 'admin' ? "default" : "secondary"} className="mt-1 text-[10px] capitalize">
+                    {viewUser.role === 'admin' ? 'Administrador' : 'Empleado'}
+                  </Badge>
+                </div>
+              </div>
+              <Separator />
+              <div className="space-y-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
+                    <Mail className="w-4 h-4 text-blue-600" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm text-gray-600">Correo Electrónico</p>
+                    <p className="font-medium text-gray-900 break-all">{viewUser.email || '-'}</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center flex-shrink-0">
+                    <Calendar className="w-4 h-4 text-indigo-600" />
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600">Fecha de creación</p>
+                    <p className="font-medium text-gray-900">
+                      {viewUser.createdAt ? new Date(viewUser.createdAt).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric' }) : '-'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <Button className="w-full" onClick={() => setViewUser(null)}>Cerrar</Button>
             </div>
           )}
         </DialogContent>

@@ -266,3 +266,31 @@ cd caja-magica-ventas-main-app && npm run dev
 - **Peso estimado:** 1 venta ≈ 1 KB; 20 ventas ≈ 35-40 KB (límite Firestore 1MB/doc ≈ 4%). `pos-daily-closes` (29 cierres) pasaría a ~1-1.5 MB (límite localStorage 5MB). Sin riesgo para el volumen actual.
 - **Retrocompatibilidad:** cierres creados ANTES del fix no tienen el snapshot (esa data ya se borró y no se recupera); el fix protege los cierres nuevos.
 - **Verificación:** `npx tsc --noEmit` + build OK + `firebase deploy --only hosting` OK.
+
+## Sesión 03/08/2026 — Botones filtro + paleta cards + sección Usuarios (desplegado, SIN commit aún)
+
+⚠️ **Estado GitHub:** estos cambios están **desplegados en Firebase** pero **NO commiteados/pusheados** (el usuario pidió subir a Firebase sin tocar GitHub). Pendiente: `git add` + commit + push.
+
+### 1. 🎨 Botones de filtro clon "Venta Regular"/"Venta por Mayor" (solo visual)
+- Reemplazado en 3 grupos: **Ventas de Hoy** (Todas/Regulares/Mayoristas), **Historial → Resumen por Producto** (Unidad/Peso + Ventas por Mayor), **Transacciones** (Todas/Regulares/Mayor).
+- Activo = `variant="secondary"` + `bg-slate-700 text-white hover:bg-slate-800 shadow-md`; inactivo = `variant="ghost"` + `text-slate-600 hover:bg-slate-100`. Contenedor `bg-slate-200/50 p-1 rounded-xl` (el de Resumen pasó de `bg-slate-100 rounded-lg` a `bg-slate-200/50 rounded-xl w-fit`).
+
+### 2. 🎨 Paleta por tipo en cards "PRODUCTOS VENDIDOS" del Detalle de Venta (~5770-5875)
+- `typeKey` + tabla `palette`: **Mayorista** (rosa), **Peso** (ámbar), **Unidad Simple** (teal), **Unidad** (azul).
+- Cabecera: fondo claro del color + **nombre en NEGRO** (`font-bold text-gray-900`). Total en cajita del color (`text-lg`, mismo tamaño que el título).
+- **Footer gris integrado** (`bg-gray-100 border-t`): icono `CheckCircle2` + nombre en gris `text-gray-500 text-sm` + **badge verde claro** `Ganancia: S/ X` (sin cambiar).
+- Se eliminó la palabra **"entregado"**, el card verde de mayorista y la celda "Ganancia" de la cuadrícula.
+- Valores: "Nivel vendido" y "P. Compra" → **negro**; "P. Venta" queda **verde**.
+- **Cantidad** (peso/unidad simple): `font-bold text-lg` → `font-medium` (mismo tamaño que el resto).
+
+### 3. 👥 Sección Usuarios
+- **`username` eliminado por completo** (interfaz `AppUser` en Index.tsx y localUserService.ts, `UserProfile` en userService.ts; `getUserByUsername` eliminado). Login sigue por correo → usuarios existentes NO afectados (campo sobrante inofensivo en datos). Botón eliminar: `user.username === 'admin'` → `disabled={auth.currentUser?.email === user.email}` (no borrarse a sí mismo).
+- **Ojito** en Acciones → modal **"Información del Usuario"** rediseñado (avatar de iniciales indigo + nombre + badge de rol + filas con iconos `Mail`/`Calendar` + `Separator` + botón Cerrar). Solo lectura, sin contraseña.
+- **Editar**: correo **no editable** (`disabled`, arregla bug: editar correo rompía el acceso porque no se actualizaba en Firebase Auth); nombre editable.
+- **Contraseña en Editar**: `editarUsuario` abre con `{...user, password: ''}`; etiqueta **"¿Olvidaste tu contraseña? Realiza una nueva aquí"** + "(déjala vacía para mantener la actual)". `guardarEdicionUsuario` restaura el hash si queda vacío.
+- **Encabezado**: badge con el nombre del usuario logueado (`users.find(u => u.email === auth.currentUser?.email)?.name || firebaseUser?.name`) → se actualiza en tiempo real vía `onSnapshot`.
+- ⏳ **PENDIENTE (no hecho, por pedido del usuario):** el cierre de caja (`cerrarCaja`, `currentUserName` línea ~3605) sigue leyendo `firebaseUser?.name` primero → el nombre editado NO se refleja ahí hasta reloguear. Fix pendiente: reordenar a `users.find(...)?.name` primero (y/o refrescar `firebaseUser` al editar y usar `auth.currentUser?.uid` como fallback de `firebaseUid` en `updateUserProfile`).
+
+### 4. ✅ Despliegue
+- `npx tsc --noEmit` OK, `npm run build` OK, `firebase deploy --only hosting` OK → **https://sistema-de-ventas-milam.web.app**.
+- **GitHub NO actualizado** (sin commit/push, según pedido). En la otra PC: **Ctrl+Shift+R**.

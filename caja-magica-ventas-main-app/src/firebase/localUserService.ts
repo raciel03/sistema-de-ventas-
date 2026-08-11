@@ -3,7 +3,6 @@ import { db } from './config';
 
 export interface AppUser {
   id: string;
-  username: string;
   password: string;
   email: string;
   role: 'admin' | 'empleado';
