@@ -4,7 +4,7 @@
 - **Live URL:** https://sistema-de-ventas-milam.web.app
 - **Firebase project:** `sistema-de-ventas-milam`
 - **GitHub:** https://github.com/raciel03/sistema-de-ventas- (privado)
-- **Archivo principal:** `caja-magica-ventas-main-app/src/pages/Index.tsx` (~10497 líneas)
+- **Archivo principal:** `SISTEMA_DE_VENTAS_PARA_DISTINTAS_EMPRESAS/src/pages/Index.tsx` (~10497 líneas)
 - **Backup:** `_backup_antes_stock_unificado/`
 
 ## Última sesión — 24 Julio 2026
@@ -51,7 +51,7 @@
 - 64 archivos, 33k+ líneas
 
 ### 7. Firebase deploys
-Múltiples despliegues con `cd caja-magica-ventas-main-app && npm run build && firebase deploy --only hosting`
+Múltiples despliegues con `cd SISTEMA_DE_VENTAS_PARA_DISTINTAS_EMPRESAS && npm run build && firebase deploy --only hosting`
 Incluye deploy luego de crear el índice compuesto para `getStockHistoryByProduct`.
 
 ## Hallazgos clave sobre `price_change`
@@ -81,7 +81,7 @@ Se eliminó la corrección automática de tipo que causó que 42 productos se mo
 - Stock tomado del nivel "Unidad" en `saleLevels`
 - `initialStock` tomado del nivel "Unidad"
 - `saleLevels` eliminados completamente de esos productos
-- Backup guardado en: `caja-magica-ventas-main-app/_backup_productos_antes_restaurar.json`
+- Backup guardado en: `SISTEMA_DE_VENTAS_PARA_DISTINTAS_EMPRESAS/_backup_productos_antes_restaurar.json`
 
 **Estado actual en Firebase:**
 - unidad: 54
@@ -117,13 +117,13 @@ const corregirTipo = (p: Product) => {
 ## Comandos útiles
 ```powershell
 # Build
-cd caja-magica-ventas-main-app && npm run build
+cd SISTEMA_DE_VENTAS_PARA_DISTINTAS_EMPRESAS && npm run build
 
 # Deploy
-cd caja-magica-ventas-main-app && firebase deploy --only hosting
+cd SISTEMA_DE_VENTAS_PARA_DISTINTAS_EMPRESAS && firebase deploy --only hosting
 
 # Dev server
-cd caja-magica-ventas-main-app && npm run dev
+cd SISTEMA_DE_VENTAS_PARA_DISTINTAS_EMPRESAS && npm run dev
 ```
 
 ## Notas
@@ -154,7 +154,7 @@ cd caja-magica-ventas-main-app && npm run dev
 5. **Filtros en líneas ~779 y ~861 quedan COMENTADOS deliberadamente** → no se borra nada local. Costo: lo borrado desde otra PC no desaparece aquí automáticamente (se puede borrar a mano). Solo reactivar si se quiere propagar borrados, y solo con el pending optimista funcionando.
 
 ### 🧰 Herramientas de diagnóstico
-- Script `_consultar_ventas_hoy` (temporal): consulta ventas de hoy desde Firebase. `firebase-admin` v14 usa **`admin.cert()`** (NO `admin.credential.cert()`); debe ejecutarse desde `caja-magica-ventas-main-app` (ahí vive `node_modules`) y como `.cjs` (la app tiene `"type": "module"`).
+- Script `_consultar_ventas_hoy` (temporal): consulta ventas de hoy desde Firebase. `firebase-admin` v14 usa **`admin.cert()`** (NO `admin.credential.cert()`); debe ejecutarse desde `SISTEMA_DE_VENTAS_PARA_DISTINTAS_EMPRESAS` (ahí vive `node_modules`) y como `.cjs` (la app tiene `"type": "module"`).
 - Key de servicio admin: `C:\Users\Raciel\Downloads\sistema-de-ventas-milam-firebase-adminsdk-fbsvc-1aa8f02017.json`.
 
 ### ⚠️ Recomendaciones pendientes

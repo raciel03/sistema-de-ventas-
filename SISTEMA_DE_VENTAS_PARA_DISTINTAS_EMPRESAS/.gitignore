@@ -11,7 +11,19 @@ node_modules
 dist
 dist-ssr
 *.local
+
+# Secretos: nunca subir
 .env
+.env.*
+*.pem
+*.key
+serviceAccountKey.json
+scripts/_diag*.mjs
+
+# Datos de negocio: jamas subir a GitHub
+backups/
+*_backup_*.json
+*-backup-*.json
 
 # Editor directories and files
 .vscode/*
