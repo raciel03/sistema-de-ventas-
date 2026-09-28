@@ -2347,7 +2347,7 @@ const Index = () => {
     <div class="empresa">DISTRIBUIDORA MILAM S.AC</div>
     <div class="ruc">RUC 20614583968</div>
     <div class="direccion">CLL JUAN MATA NRO.1040 ICA - NASCA - NASCA</div>
-    <div class="celular">CEL: 917959299 - 963264293</div>
+    <div class="celular">CEL: 917959299 - 964264293</div>
   </div>
 
   <div class="ticket-title">BOLETA DE VENTA</div>
