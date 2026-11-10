@@ -1,5 +1,5 @@
-const CLOUD_NAME = 'zongisie';
-const UPLOAD_PRESET = 'ml_default';
+const CLOUD_NAME = 'xpxuidwx';
+const UPLOAD_PRESET = 'ferreteria';
 
 const compressAndUpload = (blob: Blob, productId: string, quality: number): Promise<string> => {
   return new Promise((resolve, reject) => {

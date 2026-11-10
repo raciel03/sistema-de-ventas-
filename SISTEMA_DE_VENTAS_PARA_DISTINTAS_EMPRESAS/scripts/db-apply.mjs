@@ -1,140 +1,112 @@
-/**
- * Aplica las migraciones de supabase/migrations/ en orden.
- *
- *   node scripts/db-apply.mjs              # aplica pendientes
- *   node scripts/db-apply.mjs --status     # solo muestra el estado
- *
- * Dos vias de autenticacion (usa la que tengas):
- *
- *   A) Management API (RECOMENDADA, no necesita contrasena de la BD)
- *      $env:SB_ACCESS_TOKEN = 'sbp_...'
- *
- *   B) Conexion directa a Postgres por el pooler (us-east-1, IPv4)
- *      $env:SB_DB_PASSWORD = '...'
- *
- * Nunca se escribe la credencial en disco: se lee siempre del entorno.
- */
-import { readFileSync, readdirSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { Client } from 'pg';
+import { readFileSync, readdirSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
-const REF = process.env.SB_PROJECT_REF || 'ulhrsfwvjmvlagtqglcx';
-const ACCESS_TOKEN = process.env.SB_ACCESS_TOKEN;
-const DB_PASSWORD = process.env.SB_DB_PASSWORD;
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const MIGRATIONS = join(ROOT, 'supabase', 'migrations');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SUPABASE_DIR = resolve(__dirname, '..', 'supabase', 'migrations');
 
-const REGIONS = [
-  'us-east-1', 'us-west-2', 'us-west-1', 'ca-central-1', 'sa-east-1',
-  'eu-central-1', 'eu-west-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1',
-];
+const REF = process.env.SB_REF;
+const PASS = process.env.SB_DB_PASSWORD;
+const REGION = process.env.SB_REGION;
 
-if (!ACCESS_TOKEN && !DB_PASSWORD) {
-  console.error('Falta SB_ACCESS_TOKEN o SB_DB_PASSWORD en el entorno.');
+if (!REF || !PASS || !REGION) {
+  console.error('Faltan SB_REF, SB_REGION o SB_DB_PASSWORD');
   process.exit(1);
 }
 
-/**
- * Ejecuta SQL y devuelve un array de filas.
- * Toda la migracion va en un solo viaje: si algo falla, no queda a medias.
- */
-async function makeRunner() {
-  if (ACCESS_TOKEN) {
-    const run = async (sql) => {
-      const res = await fetch(`https://api.supabase.com/v1/projects/${REF}/database/query`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ query: sql }),
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Management API ${res.status}: ${body.slice(0, 600)}`);
-      }
-      const json = await res.json();
-      return Array.isArray(json) ? json : [];
-    };
-    await run('select 1');
-    return { run, label: `Management API (project ${REF})` };
-  }
+const HOSTS = [
+  `aws-0-${REGION}.pooler.supabase.com`,
+  `aws-0-${REGION}.pooler.supabase.com`,
+];
 
-  // Via B: pooler de Postgres
-  const { Client } = await import('pg');
-  let client = null;
-  for (const region of REGIONS) {
-    for (const port of [5432, 6543]) {
-      const c = new Client({
-        host: `aws-0-${region}.pooler.supabase.com`,
-        port,
-        database: 'postgres',
-        user: port === 6543 ? `postgres.${REF}` : `postgres.${REF}`,
-        password: DB_PASSWORD,
-        connectionTimeoutMillis: 8000,
-        ssl: { rejectUnauthorized: false },
-      });
-      try {
-        await c.connect();
-        client = c;
-        return {
-          label: `Postgres ${region}:${port}`,
-          run: async (sql) => (await client.query(sql)).rows,
-        };
-      } catch {
-        try { await c.end(); } catch { /* ya cerrada */ }
+async function conectar(host, port) {
+  const client = new Client({
+    host,
+    port,
+    user: `postgres.${REF}`,
+    password: PASS,
+    database: 'postgres',
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 15000,
+  });
+  await client.connect();
+  return client;
+}
+
+let client = null;
+let elegido = null;
+
+for (const host of HOSTS) {
+  for (const port of [5432, 6543]) {
+    try {
+      client = await conectar(host, port);
+      elegido = `${host}:${port}`;
+      break;
+    } catch (e) {
+      const m = e.message || '';
+      if (/password authentication failed/i.test(m)) {
+        console.error(`  ${host}:${port}  CONTRASENA INCORRECTA`);
+        if (client) { try { await client.end(); } catch {} client = null; }
+        continue;
       }
+      console.log(`  ${host}:${port}  fallo: ${m.split('\n')[0]}`);
+      if (client) { try { await client.end(); } catch {} client = null; }
     }
   }
-  throw new Error('No se pudo conectar por el pooler. Revisa SB_DB_PASSWORD.');
+  if (client) break;
 }
 
-const BOOTSTRAP = `
-create schema if not exists supabase_migrations;
-create table if not exists supabase_migrations.schema_migrations (
-  version text primary key,
-  statements text[],
-  name text
-);
-`;
-
-function migrationFiles() {
-  return readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort();
+if (!client) {
+  console.error('\nNo se pudo conectar. Revisa SUPABASE_DB_PASSWORD en .env');
+  process.exit(1);
 }
 
-const { run, label } = await makeRunner();
-await run(BOOTSTRAP);
+console.log(`Conectado: ${elegido}`);
 
-const files = migrationFiles();
-const done = new Set(
-  (await run('select version from supabase_migrations.schema_migrations'))
-    .map((r) => r.version),
-);
-const pending = files.filter((f) => !done.has(f.split('_')[0]));
+const yaAplicadas = new Set();
 
-console.log(`\nProyecto: ${REF} | Conexion: ${label}`);
-console.log(`Migraciones: ${files.length} | aplicadas: ${files.length - pending.length} | pendientes: ${pending.length}\n`);
+// El proyecto nuevo no tiene la tabla de control: se crea si falta.
+await client.query(`
+  create schema if not exists supabase_migrations;
+  create table if not exists supabase_migrations.schema_migrations (
+    version    text primary key,
+    name       text,
+    statements integer,
+    applied_at timestamptz not null default now()
+  );
+`);
+const r = await client.query('select version from supabase_migrations.schema_migrations');
+r.rows.forEach(x => yaAplicadas.add(x.version));
+console.log(`Ya aplicadas: ${[...yaAplicadas].join(', ') || 'ninguna'}`);
 
-if (process.argv.includes('--status')) {
-  for (const f of files) {
-    console.log(`  ${done.has(f.split('_')[0]) ? '[aplicada] ' : '[pendiente]'} ${f}`);
+const archivos = readdirSync(SUPABASE_DIR).filter(f => f.endsWith('.sql')).sort();
+for (const archivo of archivos) {
+  const version = archivo.split('_')[0];
+  if (yaAplicadas.has(version)) {
+    console.log(`  ${archivo}  ya aplicada, se omite`);
+    continue;
   }
-  process.exit(0);
-}
-
-for (const file of pending) {
-  const version = file.split('_')[0];
-  const name = file.replace(/^\d+_/, '').replace(/\.sql$/, '');
-  const sql = readFileSync(join(MIGRATIONS, file), 'utf8');
-  console.log(`Aplicando ${file} ...`);
+  const sql = readFileSync(resolve(SUPABASE_DIR, archivo), 'utf8');
+  const client2 = await conectar(elegido.split(':')[0], Number(elegido.split(':')[1]));
   try {
-    // La migracion y su registro van juntos en el mismo viaje.
-    await run(`${sql}\n\ninsert into supabase_migrations.schema_migrations (version, name) values ('${version}', '${name}') on conflict (version) do nothing;`);
-    console.log('  OK\n');
+    await client2.query('BEGIN');
+    await client2.query(sql);
+    await client2.query(
+      `insert into supabase_migrations.schema_migrations (version, name) values ($1, $2)
+       on conflict (version) do nothing`,
+      [version, archivo.split('_').slice(1).join('_').replace('.sql', '')]
+    );
+    await client2.query('COMMIT');
+    console.log(`  ${archivo}  APLICADA`);
   } catch (e) {
-    console.error(`  FALLO en ${file}:\n${e.message}\n`);
-    process.exit(1);
+    await client2.query('ROLLBACK').catch(() => {});
+    console.error(`  ${archivo}  ERROR: ${e.message.split('\n')[0]}`);
+    process.exitCode = 1;
+  } finally {
+    await client2.end();
   }
 }
 
-console.log(pending.length ? `Aplicadas: ${pending.length}\n` : 'No hay migraciones pendientes.\n');
+await client.end();
+console.log('Listo.');

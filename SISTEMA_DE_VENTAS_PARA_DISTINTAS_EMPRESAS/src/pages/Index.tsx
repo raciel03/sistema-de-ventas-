@@ -9,21 +9,34 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboOption } from "@/components/ui/combobox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { uploadProductImage, uploadBase64ToCloudinary } from "@/firebase/storage";
+import { uploadProductImage, uploadBase64ToCloudinary } from "@/lib/cloudinary";
+import LoaderFerro from "@/components/LoaderFerro";
+import { esAdminActual } from "@/lib/permisos";
+import { InfoProductoNiveles } from "@/components/InfoProductoNiveles";
+import { EMPRESA } from "@/config/empresa";
 import qz from "qz-tray";
-import { loginWithEmail, loginWithGoogle, createUserWithoutSignIn, logout as firebaseLogout, onAuthChange } from "@/firebase/auth";
-import { auth } from "@/firebase/config";
-import { createUserProfile, getUserProfile, getUserByEmail, updateUserProfile, deleteUserProfile } from "@/firebase/userService";
-import type { UserProfile } from "@/firebase/userService";
-import { getAllProducts, createProduct, updateProduct, deleteProduct, replaceAllProducts, subscribeProducts } from "@/firebase/productService";
-import { getAllSales, createSale, updateSale, deleteSale, replaceAllSales, subscribeSales } from "@/firebase/saleService";
-import { getAllStockHistory, createStockHistoryItem, updateStockHistoryItem, replaceAllStockHistory, subscribeStockHistory, deleteStockHistoryItem, getStockHistoryByProduct } from "@/firebase/stockHistoryService";
-import { getAllDailyCloses, createDailyClose, updateDailyClose, deleteDailyClose, replaceAllDailyCloses, subscribeDailyCloses } from "@/firebase/dailyCloseService";
-import { getAllLocalUsers, createLocalUser, updateLocalUser, deleteLocalUser, replaceAllLocalUsers, subscribeLocalUsers } from "@/firebase/localUserService";
+import QRCode from "qrcode";
+import { loginWithEmail, logout as firebaseLogout, onAuthChange, getCurrentSupabaseUser, enviarResetPassword, cambiarPassword, crearUsuarioPorAdmin, adminCambiarPassword } from "@/supabase/auth";
+import { createUserProfile, getUserProfile, getUserByEmail, updateUserProfile, deleteUserProfile } from "@/supabase/userService";
+import type { UserProfile } from "@/supabase/userService";
+import { getAllProducts, createProduct, updateProduct, deleteProduct, subscribeProducts, getProductById } from "@/supabase/productService";
+import { getAllSales, createSale, updateSale, deleteSale, subscribeSales } from "@/supabase/saleService";
+import { getAllStockHistory, createStockHistoryItem, updateStockHistoryItem, subscribeStockHistory, deleteStockHistoryItem, getStockHistoryByProduct } from "@/supabase/stockHistoryService";
+import { getAllDailyCloses, createDailyClose, updateDailyClose, deleteDailyClose, subscribeDailyCloses } from "@/supabase/dailyCloseService";
+import { getAllLocalUsers, createLocalUser, updateLocalUser, deleteLocalUser, subscribeLocalUsers } from "@/supabase/localUserService";
+import { getAllClients, createClient, updateClient, deleteClient, subscribeClients, consultarRuc } from "@/supabase/clientService";
+import type { Cliente } from "@/supabase/clientService";
+import { getAllComprobantes, emitirComprobante, anularComprobante, subscribeComprobantes, updateComprobanteSunat } from "@/supabase/comprobanteService";
+import type { Comprobante } from "@/supabase/comprobanteService";
+import { getEmisor, saveEmisor } from "@/supabase/emisorService";
+import type { Emisor } from "@/supabase/emisorService";
+import { emitirSunat } from "@/supabase/sunatService";
+import { supabase } from "@/supabase/client";
 import { 
   ShoppingCart, 
   Package, 
@@ -56,7 +69,18 @@ import {
   RefreshCw,
   CheckCircle2,
   Mail,
-  X
+  X,
+  Lock,
+  Users,
+  ReceiptText,
+  Building2,
+  Copy,
+  Phone,
+  MapPin,
+  Check,
+  ChevronDown,
+  Image as ImageIcon,
+  Printer
 } from "lucide-react";
 
 interface SaleLevel {
@@ -77,7 +101,7 @@ interface Product {
   stock: number;
   initialStock: number;
   category: string;
-  type: 'unidad' | 'peso' | 'mayorista';
+  type: 'unidad' | 'peso' | 'mayorista' | 'metro';
   imageUrl?: string;
   purchasePricePerKg?: number;
   salePricePerKg?: number;
@@ -94,6 +118,9 @@ interface SaleItem {
   quantity: number;
   selectedLevelName?: string;
   levelQuantity?: number;
+  levelId?: number;
+  /** Total de la linea tal como lo guardo la base (mas fiable que recalcularlo). */
+  totalLinea?: number;
 }
 
 interface Sale {
@@ -106,6 +133,9 @@ interface Sale {
   totalProfit: number;
   date: string;
   localDate?: string;
+  clientId?: string;
+  /** uuid del usuario que atendio (ventas.usuario_id), lo pone la base. */
+  userId?: string;
   paymentMethod: 'efectivo' | 'tarjeta' | 'yape' | 'plin';
   amountPaid?: number;
   change?: number;
@@ -140,6 +170,7 @@ interface StockHistoryItem {
   resultingStock: number;
   date: string;
   isSummary?: boolean;
+  isInitial?: boolean;
   // Campos para productos mayoristas
   levelQuantities?: { [key: string]: number };
   levelDescription?: string;
@@ -156,7 +187,7 @@ interface StockHistoryDisplayRow {
   date: string;
   stockActual: number;
   soldQuantity: number | null;
-  addedQuantity: number;
+  addedQuantity: number | null;
   resultingStock: number;
   isInitial: boolean;
 }
@@ -180,6 +211,43 @@ const normalizeSearch = (text: string): string =>
 const escapeHtml = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+/** Convierte un monto a letras en español: 110.40 -> "CIENTO DIEZ CON 40/100". */
+const numeroALetras = (valor: number): string => {
+  const numero = Number.isFinite(valor) ? Math.abs(valor) : 0;
+  const entero = Math.floor(numero);
+  const centavos = Math.round((numero - entero) * 100);
+  const UNIDADES = ['', 'UNO', 'DOS', 'TRES', 'CUATRO', 'CINCO', 'SEIS', 'SIETE', 'OCHO', 'NUEVE'];
+  const ESPECIALES = ['DIEZ', 'ONCE', 'DOCE', 'TRECE', 'CATORCE', 'QUINCE', 'DIECISEIS', 'DIECISIETE', 'DIECIOCHO', 'DIECINUEVE'];
+  const DECENAS = ['', 'DIEZ', 'VEINTE', 'TREINTA', 'CUARENTA', 'CINCUENTA', 'SESENTA', 'SETENTA', 'OCHENTA', 'NOVENTA'];
+  const CENTENAS = ['', 'CIENTO', 'DOSCIENTOS', 'TRESCIENTOS', 'CUATROCIENTOS', 'QUINIENTOS', 'SEISCIENTOS', 'SETECIENTOS', 'OCHOCIENTOS', 'NOVECIENTOS'];
+  const decenas = (n: number): string => {
+    if (n < 10) return UNIDADES[n];
+    if (n < 20) return ESPECIALES[n - 10];
+    if (n === 20) return 'VEINTE';
+    if (n < 30) return 'VEINTI' + UNIDADES[n - 20];
+    const d = Math.floor(n / 10);
+    const u = n % 10;
+    return DECENAS[d] + (u ? ' Y ' + UNIDADES[u] : '');
+  };
+  const centenas = (n: number): string => {
+    if (n === 0) return '';
+    if (n === 100) return 'CIEN';
+    const c = Math.floor(n / 100);
+    const resto = n % 100;
+    return CENTENAS[c] + (resto ? ' ' + decenas(resto) : '');
+  };
+  const miles = (n: number): string => {
+    if (n === 0) return 'CERO';
+    const m = Math.floor(n / 1000);
+    const resto = n % 1000;
+    let texto = '';
+    if (m > 0) texto += m === 1 ? 'MIL' : centenas(m) + ' MIL';
+    if (resto > 0) texto += (texto ? ' ' : '') + centenas(resto);
+    return texto;
+  };
+  return `${miles(entero)} CON ${String(centavos).padStart(2, '0')}/100`;
+};
+
 const generateId = (): string => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -196,6 +264,12 @@ const generateSaleId = (): string => {
   return `${Date.now()}${_saleIdCounter}`;
 };
 
+const dedupeBySaleId = (lista: Sale[]): Sale[] => {
+  const vistos = new Map<string, Sale>();
+  for (const s of lista) { if (s && s.id !== undefined && s.id !== null) vistos.set(s.id, s); }
+  return Array.from(vistos.values());
+};
+
 const stripUndefined = (obj: any): any => {
   if (obj === null || typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(stripUndefined);
@@ -209,24 +283,15 @@ const stripUndefined = (obj: any): any => {
 
 const WEIGHT_DECIMAL_PATTERN = /^\d*(?:[.,]\d{0,3})?$/;
 
-const hashPassword = async (password: string): Promise<string> => {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(password);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-};
-
-const isHashed = (password: string): boolean => {
-  return /^[a-f0-9]{64}$/i.test(password);
-};
-
-const isValidAdminPassword = async (input: string, users: AppUser[]): Promise<boolean> => {
-  // Primero comparar texto plano
-  if (users.some(u => u.role === 'admin' && u.password === input)) return true;
-  // Fallback: comparar hash legacy
-  const hashed = await hashPassword(input);
-  return users.some(u => u.role === 'admin' && u.password === hashed);
+/**
+ * Peso en gramos -> texto legible en tickets.
+ * 1000 g -> "1.00 kg" | 250 g -> "0.25 kg" | 500 g -> "500 g"
+ * Se usa "kg" con 2 decimales para que nunca se lea como 1000 kg.
+ */
+const formatearPeso = (gramos: number): string => {
+  const g = Number.isFinite(gramos) ? gramos : 0;
+  if (g < 1000) return `${Math.round(g)} g`;
+  return `${(g / 1000).toFixed(2)} kg`;
 };
 
 // Pending sync helpers: localStorage tracks items created offline that haven't reached Firebase yet
@@ -245,6 +310,21 @@ const removePendingId = (key: string, id: string) => {
 };
 const isPendingId = (key: string, id: string): boolean => {
   try { return (JSON.parse(localStorage.getItem(key) || '[]') as string[]).includes(id); } catch (e) { return false; }
+};
+const leerPendientes = (key: string): string[] => {
+  try { const arr = JSON.parse(localStorage.getItem(key) || '[]'); return Array.isArray(arr) ? arr : []; } catch { return []; }
+};
+const leerLista = <T,>(key: string): T[] => {
+  try { const arr = JSON.parse(localStorage.getItem(key) || '[]'); return Array.isArray(arr) ? arr : []; } catch { return []; }
+};
+/** Une lo que llego de la base con los registros locales aun pendientes de subir. */
+const unirPendientes = <T extends { id: string }>(locales: T[], base: T[], clave: string): T[] => {
+  const pendientes = new Set(leerPendientes(clave));
+  const porId = new Map(base.map((x) => [x.id, x] as const));
+  for (const l of locales) {
+    if (pendientes.has(l.id) && !porId.has(l.id)) porId.set(l.id, l);
+  }
+  return Array.from(porId.values());
 };
 const safeSetItem = (key: string, value: string) => {
   try { localStorage.setItem(key, value); } catch (e) { console.warn('localStorage quota exceeded:', key); }
@@ -313,7 +393,7 @@ const Index = () => {
   const [transaccionesSearch, setTransaccionesSearch] = useState("");
   const [resumenSearch, setResumenSearch] = useState("");
   const [salesSearch, setSalesSearch] = useState("");
-  const [inventoryView, setInventoryView] = useState<'todos' | 'unidad' | 'peso'>('todos');
+  const [inventoryView, setInventoryView] = useState<'todos' | 'unidad' | 'peso' | 'metro'>('todos');
   const [paymentMethod, setPaymentMethod] = useState<'efectivo' | 'tarjeta' | 'yape' | 'plin'>('efectivo');
   const [amountPaid, setAmountPaid] = useState("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -322,10 +402,14 @@ const Index = () => {
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [isEditWeightProductOpen, setIsEditWeightProductOpen] = useState(false);
   const [editingWeightProduct, setEditingWeightProduct] = useState<Product | null>(null);
+  const [isEditMetroProductOpen, setIsEditMetroProductOpen] = useState(false);
+  const [editingMetroProduct, setEditingMetroProduct] = useState<Product | null>(null);
   const [isAddProductOpen, setIsAddProductOpen] = useState(false);
   const [isEditProductOpen, setIsEditProductOpen] = useState(false);
   const [isAddUserOpen, setIsAddUserOpen] = useState(false);
   const [isEditUserOpen, setIsEditUserOpen] = useState(false);
+  // Modal de confirmacion antes de bloquear un empleado
+  const [usuarioAEliminar, setUsuarioAEliminar] = useState<AppUser | null>(null);
   const [isCloseCashOpen, setIsCloseCashOpen] = useState(false);
   const [selectedSaleDetail, setSelectedSaleDetail] = useState<Sale | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
@@ -335,9 +419,17 @@ const Index = () => {
   const [isVentasIndividualesOpen, setIsVentasIndividualesOpen] = useState(false);
   const [showIndividualSales, setShowIndividualSales] = useState(false);
   const [editingUser, setEditingUser] = useState<AppUser | null>(null);
+  const [editUserPassword, setEditUserPassword] = useState('');
+  const [isChangingUserPassword, setIsChangingUserPassword] = useState(false);
+  // Mensaje del overlay de carga (null = oculto).
+  const [cargando, setCargando] = useState<string | null>(null);
   const [viewUser, setViewUser] = useState<AppUser | null>(null);
-  const [addProductMode, setAddProductMode] = useState<'unidad' | 'peso' | 'mayorista'>('unidad');
+  const [addProductMode, setAddProductMode] = useState<'unidad' | 'peso' | 'metro' | 'mayorista'>('unidad');
   const [newWeightProduct, setNewWeightProduct] = useState({ name: "", purchasePrice: 0, salePrice: 0, purchasePricePerKg: 0, salePricePerKg: 0, equivalentGrams: 0, stock: 0, initialStock: 0, minWeightGrams: 0, category: "" });
+  const [newMetroProduct, setNewMetroProduct] = useState({ name: "", purchasePrice: 0, salePrice: 0, initialStockCm: 0, category: "" });
+  const [metroPurchaseInput, setMetroPurchaseInput] = useState('');
+  const [metroSaleInput, setMetroSaleInput] = useState('');
+  const [metroStockInput, setMetroStockInput] = useState('');
   // Manejo de input como string para permitir ceros y decimales (e.g., "0.020")
   const [equivalentGramsInput, setEquivalentGramsInput] = useState('');
   const [equivalentGramsError, setEquivalentGramsError] = useState('');
@@ -350,18 +442,26 @@ const Index = () => {
   // para no reescribir/redescargar todo en cada venta. No afecta el fix de borrado (sigue desactivado).
   const syncedSaleIds = useRef<Set<string>>(new Set());
   const syncedHistoryIds = useRef<Set<string>>(new Set());
+  const ventasEnviandoseRef = useRef<Set<string>>(new Set());
   // Ya no se necesita seguimiento de IDs sincronizados — cada sync escribe todo via setDoc (upsert)
   const [modalProductHistory, setModalProductHistory] = useState<StockHistoryItem[]>([]);
+  // Pestaña activa del nuevo diseño del modal de información (niveles sin Unidad)
+  const [infoLevelTab, setInfoLevelTab] = useState(0);
+  // Se incrementa cuando una venta termina de guardarse en Supabase para que el
+  // modal de información recargue el historial con la venta recién registrada.
+  const [tickHistorial, setTickHistorial] = useState(0);
+  // IDs de historial que ya están viajando a Supabase (aunque su pendiente se
+  // quite en el camino): el modal debe mostrarlos igual para que la primera
+  // venta nunca aparezca sin su contorno "Stock Inicial".
+  const historialEnVueloRef = useRef<Set<string>>(new Set());
   const [isStockHistoryModalOpen, setIsStockHistoryModalOpen] = useState(false);
   const [selectedStockHistoryProduct, setSelectedStockHistoryProduct] = useState<Product | null>(null);
   const [isDeleteStockHistoryOpen, setIsDeleteStockHistoryOpen] = useState(false);
   const [showStockRestockForm, setShowStockRestockForm] = useState(false);
   const [selectedHistoryLevel, setSelectedHistoryLevel] = useState<string>('');
-  const [stockHistoryRestockQuantity, setStockHistoryRestockQuantity] = useState('');
-  const [clearHistoryPassword, setClearHistoryPassword] = useState("");
-  const [isDeleteSaleOpen, setIsDeleteSaleOpen] = useState(false);
-  const [deleteSalePassword, setDeleteSalePassword] = useState("");
-  const [saleToDelete, setSaleToDelete] = useState<Sale | null>(null);
+const [stockHistoryRestockQuantity, setStockHistoryRestockQuantity] = useState('');
+const [isDeleteSaleOpen, setIsDeleteSaleOpen] = useState(false);
+const [saleToDelete, setSaleToDelete] = useState<Sale | null>(null);
   // Estados para reposición mayorista
   const [selectedMayoristaRestockLevel, setSelectedMayoristaRestockLevel] = useState('');
   const [mayoristaRestockQuantity, setMayoristaRestockQuantity] = useState('');
@@ -408,6 +508,10 @@ const Index = () => {
   // Edit weight product inputs
   const [editPurchasePerKgInput, setEditPurchasePerKgInput] = useState('');
   const [editSalePerKgInput, setEditSalePerKgInput] = useState('');
+  // Edit metro product inputs
+  const [editMetroPurchaseInput, setEditMetroPurchaseInput] = useState('');
+  const [editMetroSaleInput, setEditMetroSaleInput] = useState('');
+  const [editMetroStockInput, setEditMetroStockInput] = useState('');
   const [isMigrating, setIsMigrating] = useState(false);
 
   // Sincronización en tiempo real entre pestañas y actualización visual
@@ -455,6 +559,15 @@ const Index = () => {
     !!minWeightError
   );
 
+  const isMetroFormInvalid = (
+    !newMetroProduct.name.trim() ||
+    !newMetroProduct.category.trim() ||
+    newMetroProduct.purchasePrice <= 0 ||
+    newMetroProduct.salePrice <= 0 ||
+    newMetroProduct.initialStockCm <= 0 ||
+    newMetroProduct.purchasePrice >= newMetroProduct.salePrice
+  );
+
   const isMayoristaFormInvalid = (
     !newMayoristaProduct.name.trim() ||
     !newMayoristaProduct.category.trim() ||
@@ -469,8 +582,6 @@ const Index = () => {
   // Estados para edición rápida de productos
   const [editingQuickProduct, setEditingQuickProduct] = useState<Product | null>(null);
   const [isEditQuickProductOpen, setIsEditQuickProductOpen] = useState(false);
-  const [showEditUserPassword, setShowEditUserPassword] = useState(false);
-  
   // Estados para modal de peso
   const [isWeightModalOpen, setIsWeightModalOpen] = useState(false);
   const [selectedWeightProduct, setSelectedWeightProduct] = useState<Product | null>(null);
@@ -478,6 +589,14 @@ const Index = () => {
   const [customWeight, setCustomWeight] = useState('');
   const [customMoney, setCustomMoney] = useState('');
   const [weightInputMode, setWeightInputMode] = useState<'grams' | 'money'>('grams');
+
+  // Estados para modal de venta por metro
+  const [isMetroModalOpen, setIsMetroModalOpen] = useState(false);
+  const [selectedMetroProduct, setSelectedMetroProduct] = useState<Product | null>(null);
+  const [metroQuantities, setMetroQuantities] = useState<{ [key: string]: number }>({});
+  const [customMeters, setCustomMeters] = useState('');
+  const [customMetroMoney, setCustomMetroMoney] = useState('');
+  const [metroInputMode, setMetroInputMode] = useState<'meters' | 'money'>('meters');
 
   useEffect(() => {
     if (selectedWeightProduct) {
@@ -499,6 +618,24 @@ const Index = () => {
       setWeightInputMode('grams');
     }
   }, [isWeightModalOpen]);
+
+  useEffect(() => {
+    if (selectedMetroProduct) {
+      const updated = products.find(p => p.id === selectedMetroProduct.id);
+      if (updated) {
+        setSelectedMetroProduct(updated);
+      }
+    }
+  }, [products]);
+
+  useEffect(() => {
+    if (!isMetroModalOpen) {
+      setMetroQuantities({});
+      setCustomMeters('');
+      setCustomMetroMoney('');
+      setMetroInputMode('meters');
+    }
+  }, [isMetroModalOpen]);
 
   useEffect(() => {
     if (!isMayoristaModalOpen) {
@@ -552,6 +689,11 @@ const Index = () => {
   const [password, setPassword] = useState("");
   const [loginEmail, setLoginEmail] = useState("");
   const [isAuthLoading, setIsAuthLoading] = useState(false);
+  // Flujo "¿Olvidaste tu contraseña?": tras el enlace de recuperacion se pide la nueva.
+  const [showResetPasswordForm, setShowResetPasswordForm] = useState(false);
+  const [nuevaPassword, setNuevaPassword] = useState('');
+  const [nuevaPassword2, setNuevaPassword2] = useState('');
+  const [isRecuperando, setIsRecuperando] = useState(false);
   const [firebaseUser, setFirebaseUser] = useState<UserProfile | null>(null);
   const [authInitialized, setAuthInitialized] = useState(false);
 
@@ -579,8 +721,6 @@ const Index = () => {
   const [isStockCriticoOpen, setIsStockCriticoOpen] = useState(false);
   const [stockCriticoLevels, setStockCriticoLevels] = useState<{ productName: string; levelName: string; stock: number }[]>([]);
   const [isClearSalesOpen, setIsClearSalesOpen] = useState(false);
-  const [clearSalesPassword, setClearSalesPassword] = useState('');
-  const [showClearSalesPassword, setShowClearSalesPassword] = useState(false);
   const [newProduct, setNewProduct] = useState({
     name: '',
     purchasePrice: 0,
@@ -598,13 +738,8 @@ const Index = () => {
   const [selectedProductsToDelete, setSelectedProductsToDelete] = useState<string[]>([]);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [productsToDelete, setProductsToDelete] = useState<Product[]>([]);
-  const [deleteProductPassword, setDeleteProductPassword] = useState('');
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
   const [isDeleteProductConfirmOpen, setIsDeleteProductConfirmOpen] = useState(false);
-  const [showDeleteProductPassword, setShowDeleteProductPassword] = useState(false);
-  const [showAdminPassword, setShowAdminPassword] = useState(false);
-  const [showClearHistoryPassword, setShowClearHistoryPassword] = useState(false);
-  const [showDeleteSalePassword, setShowDeleteSalePassword] = useState(false);
 
   // Estados para agregar usuarios
   const [newUser, setNewUser] = useState({
@@ -627,139 +762,198 @@ const Index = () => {
   const updateProductFB = useCallback(async (id: string, data: Partial<Product>) => {
     try { await updateProduct(id, stripUndefined(data)); } catch (e) { console.error('ERROR updateProductFB:', e); }
   }, []);
-  const syncProductsToFirestore = useCallback(async (data: Product[]) => {
-    try {
-      const current = await getAllProducts();
-      const curMap = new Map(current.map(p => [p.id, p]));
-      const newMap = new Map(data.map(p => [p.id, p]));
-      for (const [id, p] of newMap) {
-        const existing = curMap.get(id);
-        if (!existing) { await createProduct(id, stripUndefined(p)); }
-        else if (JSON.stringify(existing) !== JSON.stringify(p)) { await updateProduct(id, stripUndefined(p)); }
-      }
-      // BUG FIX: ya no se borran productos de Firebase que no están localmente (protege datos de la otra PC)
-      // for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteProduct(id); } catch {} } }
-    } catch (e) { console.error('ERROR syncProducts:', e); }
-  }, []);
-  const syncSalesToFirestore = useCallback(async (data: any[]) => {
-    try {
-      const pending = data.filter(s => !syncedSaleIds.current.has(s.id));
-      if (pending.length === 0) return;
-      await Promise.all(pending.map(s => createSale(s.id, stripUndefined(s))));
-      pending.forEach(s => syncedSaleIds.current.add(s.id));
-    } catch (e) { console.error('ERROR syncSales:', e); }
-  }, []);
-  const syncClosesToFirestore = useCallback(async (data: any[]) => {
-    try {
-      const current = await getAllDailyCloses();
-      const curMap = new Map(current.map(c => [c.id, c]));
-      const newMap = new Map(data.map(c => [c.id, c]));
-      for (const [id, c] of newMap) {
-        const existing = curMap.get(id);
-        if (!existing) { await createDailyClose(id, stripUndefined(c)); }
-        else { await updateDailyClose(id, stripUndefined(c)); }
-      }
-      // BUG FIX: ya no se borran cierres de Firebase que no están localmente (protege datos de la otra PC)
-      // for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteDailyClose(id); } catch {} } }
-    } catch (e) { console.error('ERROR syncCloses:', e); }
-  }, []);
-  const syncHistoryToFirestore = useCallback(async (data: any[]) => {
-    try {
-      const pending = data.filter(h => !syncedHistoryIds.current.has(h.id));
-      if (pending.length === 0) return;
-      await Promise.all(pending.map(h => createStockHistoryItem(h.id, stripUndefined(h))));
-      pending.forEach(h => syncedHistoryIds.current.add(h.id));
-    } catch (e) { console.error('ERROR syncHistory:', e); }
-  }, []);
-  const syncUsersToFirestore = useCallback(async (data: any[]) => {
-    try {
-      const current = await getAllLocalUsers();
-      const curMap = new Map(current.map(u => [u.id, u]));
-      const newMap = new Map(data.map(u => [u.id, u]));
-      for (const [id, u] of newMap) {
-        const existing = curMap.get(id);
-        if (!existing) { await createLocalUser(id, stripUndefined(u)); }
-        else if (JSON.stringify(existing) !== JSON.stringify(u)) { await updateLocalUser(id, stripUndefined(u)); }
-      }
-      // BUG FIX: ya no se borran usuarios de Firebase que no están localmente (protege datos de la otra PC)
-      // for (const id of curMap.keys()) { if (!newMap.has(id)) { try { await deleteLocalUser(id); } catch {} } }
-    } catch (e) { console.error('ERROR syncUsers:', e); }
-  }, []);
-
-
-  useEffect(() => {
-    // Cargar localStorage primero (inmediato), luego Firebase (merge async)
-    const loadFromLocal = <T,>(key: string, setter: (d: T[]) => void, migrate?: (d: T[]) => T[]) => {
+  const syncProductsToFirestore = useCallback(async (data: Product[]): Promise<boolean> => {
+    // Sube a Supabase los productos creados o editados desde la ultima vez que
+    // llegaron a la base. Si el producto ya existe se actualiza; si es nuevo se
+    // crea y el id real de la base reemplaza al temporal (UUID) en el estado y
+    // en el historial. Antes esto era un no-op: el alta se quedaba solo en
+    // localStorage y al recargar la pagina se perdia.
+    const pendientes = leerPendientes(PENDING.PRODUCTS);
+    if (pendientes.length === 0) return true;
+    const guardados = leerLista<Product>('pos-products');
+    let todoOk = true;
+    for (const id of pendientes) {
+      const base = guardados.find((x) => x?.id === id) ?? data.find((x) => x.id === id);
+      if (!base) continue;
       try {
-        const raw = localStorage.getItem(key);
-        if (raw) {
-          let data: T[] = JSON.parse(raw);
-          if (migrate) { try { const m = migrate(data); if (m) data = m; } catch { /* usar data original */ } }
-          setter(data);
+        const existe = await getProductById(base.id).catch(() => null);
+        let subido: Product = base;
+        if (existe) {
+          await updateProduct(base.id, stripUndefined(base));
         } else {
-          setter([]);
+          const creado = await createProduct(base.id, stripUndefined(base));
+          subido = { ...base, ...creado, saleLevels: base.saleLevels?.length ? base.saleLevels : creado.saleLevels };
         }
-      } catch { setter([]); }
-    };
-    loadFromLocal<Product[]>('pos-products', setProducts, (parsed: any) => {
-      let needsSave = false;
-      const migrated = parsed.map((p: any) => {
-        if ((p.type === 'mayorista' || (p.type === 'unidad' && p.saleLevels?.length)) && p.saleLevels?.length) {
-          const levels = p.saleLevels.map((l: any) => {
-            if (l.stock === undefined) {
-              needsSave = true;
-              const minLevel = p.saleLevels![0];
-              const unitsInMin = Math.floor(p.stock / (p.unitsPerBase || minLevel.baseUnitsContained));
-              const initialInMin = Math.floor(p.initialStock / (p.unitsPerBase || minLevel.baseUnitsContained));
-              return { ...l, stock: l.name === minLevel.name ? unitsInMin : 0, initialStock: l.name === minLevel.name ? initialInMin : 0 };
-            }
-            return l;
-          });
-          return { ...p, saleLevels: levels };
+        if (subido.id !== id) {
+          const viejoId = id;
+          const nuevoId = subido.id;
+          setProducts((prev) => prev.map((x) => (x.id === viejoId ? subido : x)));
+          setStockHistory((prev) => prev.map((h) => (h.productId === viejoId ? { ...h, productId: nuevoId } : h)));
+          setSelectedStockHistoryProduct((prev) => (prev && prev.id === viejoId ? { ...prev, id: nuevoId } : prev));
+          setViewingMayoristaProduct((prev) => (prev && prev.id === viejoId ? { ...prev, id: nuevoId } : prev));
+          safeSetItem('pos-products', JSON.stringify(
+            leerLista<Product>('pos-products').filter((x) => x?.id !== viejoId).concat(subido)
+          ));
+          safeSetItem('pos-stock-history', JSON.stringify(
+            leerLista<StockHistoryItem>('pos-stock-history').map((x) => (x?.productId === viejoId ? { ...x, productId: nuevoId } : x))
+          ));
         }
-        return p;
-      });
-      if (needsSave) { try { safeSetItem('pos-products', JSON.stringify(migrated)); syncProductsToFirestore(migrated); } catch { /* mantener datos locales */ } }
-      return migrated;
-    });
-    loadFromLocal('pos-sales', setSales);
-    loadFromLocal('pos-users', setUsers);
-    loadFromLocal('pos-daily-closes', setDailyCloses);
-    loadFromLocal('pos-stock-history', setStockHistory, (parsed: any) => {
-      let needsSave = false;
-      const migrated = parsed.map((item: any) => {
-        if (item.levelQuantities && !item.levelStockAfter) {
-          needsSave = true;
-          const levelNames = Object.keys(item.levelQuantities);
-          if (levelNames.length > 0) {
-            return {
-              ...item,
-              affectedLevelName: item.type !== 'initial' ? levelNames[0] : undefined,
-              levelQuantity: item.type !== 'initial' ? item.levelQuantities[levelNames[0]] : undefined,
-              levelStockAfter: levelNames.reduce((acc: any, name: string) => ({ ...acc, [name]: item.levelQuantities![name] }), {})
-            };
-          }
-        }
-        return item;
-      });
-      if (needsSave) { try { safeSetItem('pos-stock-history', JSON.stringify(migrated)); syncHistoryToFirestore(migrated); } catch { /* mantener datos locales */ } }
-      return migrated;
-    });
-    // Carga inicial via HTTP (TCP) — funciona aunque QUIC/WebSocket falle
-    (async () => {
+        removePendingId(PENDING.PRODUCTS, id);
+      } catch (e) {
+        todoOk = false;
+        console.error('ERROR syncProducts pendiente:', id, e);
+        const detalle = e instanceof Error ? e.message : String(e);
+        toast({
+          title: 'No se pudo guardar en Supabase',
+          description: `${base.name}: ${detalle}. Queda pendiente y se reintentara al recargar.`,
+          variant: 'destructive',
+          duration: 10000,
+        });
+      }
+    }
+    return todoOk;
+  }, []);
+  const syncSalesToFirestore = useCallback(async (_data: any[]) => {
+    // Sin espejo: ver syncProductsToFirestore.
+  }, []);
+  const syncClosesToFirestore = useCallback(async (data: DailyClose[]): Promise<boolean> => {
+    // Sube los cierres que quedaron pendientes. Un cierre nuevo trae id temporal
+    // (Date.now()); al insertarse se reemplaza por el id real de la base, igual
+    // que hacen los productos. Antes esto era un no-op y el Historial Diario se
+    // perdia al recargar porque el cierre nunca llegaba a `cierres_diarios`.
+    const pendientes = leerPendientes(PENDING.CLOSES);
+    if (pendientes.length === 0) return true;
+    const guardados = leerLista<DailyClose>('pos-daily-closes');
+    let todoOk = true;
+    for (const id of pendientes) {
+      const base = guardados.find((x) => x?.id === id) ?? data.find((x) => x.id === id);
+      if (!base) continue;
       try {
-        const [fbProducts, fbSales, fbUsers, fbCloses, fbHistory] = await Promise.all([
+        const esFilaExistente = /^\d+$/.test(base.id);
+        const devuelto = esFilaExistente
+          ? await updateDailyClose(base.id, stripUndefined(base))
+          : await createDailyClose(base.id, stripUndefined(base));
+        const fusionado: DailyClose = {
+          ...base,
+          ...devuelto,
+          id: devuelto.id,
+          closedBy: base.closedBy || devuelto.closedBy,
+          transacciones: base.transacciones ?? devuelto.transacciones,
+        };
+        if (fusionado.id !== id) {
+          const viejoId = id;
+          setDailyCloses((prev) => prev.map((x) => (x.id === viejoId ? fusionado : x)));
+          setSelectedCloseDetail((prev) => (prev && prev.id === viejoId ? fusionado : prev));
+          safeSetItem('pos-daily-closes', JSON.stringify(
+            leerLista<DailyClose>('pos-daily-closes').filter((x) => x?.id !== viejoId).concat(fusionado)
+          ));
+        }
+        removePendingId(PENDING.CLOSES, id);
+      } catch (e) {
+        todoOk = false;
+        console.error('ERROR syncCloses pendiente:', id, e);
+      }
+    }
+    return todoOk;
+  }, []);
+  const syncHistoryToFirestore = useCallback(async (data: StockHistoryItem[]) => {
+    // Sube los movimientos de stock pendientes. Los ids numericos ya son filas
+    // de la base (se actualizan); los nuevos se insertan y toman el id real.
+    // Sin esto el historial (initial, restock, cambios de precio) vivia solo en
+    // localStorage y desaparecia al recargar, y "Ventas por Restock" no tenia
+    // datos.
+    const pendientes = leerPendientes(PENDING.HISTORY);
+    if (pendientes.length === 0) return;
+    const guardados = leerLista<StockHistoryItem>('pos-stock-history');
+    for (const id of pendientes) {
+      const item = guardados.find((x) => x?.id === id) ?? data.find((x) => x.id === id);
+      if (!item) continue;
+      // Se quita el pendiente mientras viaja: si no, el subMerge en vivo podria
+      // subirlo a la vez y quedarian dos filas para el mismo movimiento. El ref
+      // de vuelo permite que el modal de información siga viéndolo en el camino.
+      removePendingId(PENDING.HISTORY, id);
+      historialEnVueloRef.current.add(id);
+      try {
+        const esFilaExistente = /^\d+$/.test(item.id);
+        const devuelto = esFilaExistente
+          ? await updateStockHistoryItem(item.id, stripUndefined({
+              quantity: item.quantity,
+              resultingStock: item.resultingStock,
+              date: item.date,
+              levelDescription: item.levelDescription,
+              levelStockAfter: item.levelStockAfter,
+              levelQuantities: item.levelQuantities,
+              isInitial: item.isInitial,
+              levelSoldQuantity: item.levelSoldQuantity,
+            }))
+          : await createStockHistoryItem(item.id, stripUndefined(item));
+        const fusionado: StockHistoryItem = {
+          ...devuelto,
+          isSummary: item.isSummary,
+          isInitial: item.isInitial,
+          levelQuantities: item.levelQuantities ?? devuelto.levelQuantities,
+          levelStockAfter: item.levelStockAfter ?? devuelto.levelStockAfter,
+          levelSoldQuantity: item.levelSoldQuantity ?? devuelto.levelSoldQuantity,
+          affectedLevelName: item.affectedLevelName ?? devuelto.affectedLevelName,
+          levelQuantity: item.levelQuantity ?? devuelto.levelQuantity,
+          levelDescription: item.levelDescription ?? devuelto.levelDescription,
+          priceChanges: item.priceChanges ?? devuelto.priceChanges,
+        };
+        setStockHistory((prev) =>
+          prev.some((x) => x.id === id) ? prev.map((x) => (x.id === id ? fusionado : x))
+            : prev.some((x) => x.id === fusionado.id) ? prev
+            : [...prev, fusionado]
+        );
+        safeSetItem('pos-stock-history', JSON.stringify(
+          leerLista<StockHistoryItem>('pos-stock-history')
+            .filter((x) => x?.id !== id && x?.id !== fusionado.id)
+            .concat(fusionado)
+        ));
+        removePendingId(PENDING.HISTORY, id);
+        historialEnVueloRef.current.delete(id);
+      } catch (e) {
+        console.error('ERROR syncHistory pendiente:', id, e);
+        historialEnVueloRef.current.delete(id);
+        addPendingId(PENDING.HISTORY, id);
+      }
+    }
+  }, []);
+  const syncUsersToFirestore = useCallback(async (_data: any[]) => {
+    // Ver syncProductsToFirestore: ya no hay espejo a la nube.
+  }, []);
+
+  // Reintento de arranque: si un producto (p. ej. uno por metro) o un movimiento
+  // quedaron pendientes porque la base los rechazo en su momento, se vuelven a
+  // subir solos al cargar la app en vez de esperar a que el usuario edite algo.
+  const reintentoPendientesRef = useRef(false);
+  useEffect(() => {
+    if (reintentoPendientesRef.current) return;
+    if (products.length === 0 && stockHistory.length === 0 && dailyCloses.length === 0) return;
+    reintentoPendientesRef.current = true;
+    void syncProductsToFirestore(products).then((ok) => {
+      if (ok) void syncHistoryToFirestore(stockHistory);
+    });
+    void syncClosesToFirestore(dailyCloses);
+  }, [products, stockHistory, dailyCloses, syncProductsToFirestore, syncHistoryToFirestore, syncClosesToFirestore]);
+
+
+  // Supabase es la fuente de verdad, pero las colas locales de pendientes
+  // (pos-*-pending) NO se borran: son la red de seguridad de lo que aun no sube.
+  // Antes se borraban en cada arranque y por eso desaparecian productos, ventas
+  // y cierres creados sin conexion.
+  useEffect(() => {
+    (async () => {
+      setCargando('Cargando sistema…');
+      try {
+        const [dbProducts, dbSales, dbUsers, dbCloses, dbHistory] = await Promise.all([
           getAllProducts().catch(() => null as any),
           getAllSales().catch(() => null as any),
           getAllLocalUsers().catch(() => null as any),
           getAllDailyCloses().catch(() => null as any),
           getAllStockHistory().catch(() => null as any),
         ]);
-        if (fbProducts) {
-          let local: Product[] = []; try { const s = localStorage.getItem('pos-products'); if (s) local.push(...JSON.parse(s)); } catch {}
-          for (const item of fbProducts) { if (!local.find(x => x.id === item.id)) local.push(item); }
-          local = local.filter(item => isPendingId(PENDING.PRODUCTS, item.id) || fbProducts.find(x => x.id === item.id));
-          const fixedProducts = local.map(p => ({
+        if (dbProducts) {
+          const normalizados = dbProducts.map(p => ({
             ...p,
             initialStock: (p.initialStock ?? 0) < p.stock ? p.stock : p.initialStock,
             saleLevels: p.saleLevels?.map(l => ({
@@ -767,39 +961,21 @@ const Index = () => {
               initialStock: (l.initialStock ?? 0) < l.stock ? l.stock : l.initialStock
             })) ?? p.saleLevels
           }));
-          setProducts(fixedProducts); try { localStorage.setItem('pos-products', JSON.stringify(fixedProducts)); } catch {}
+          setProducts(prev => unirPendientes(prev, normalizados, PENDING.PRODUCTS));
         }
-        if (fbSales) {
-          let local: Sale[] = []; try { const s = localStorage.getItem('pos-sales'); if (s) local.push(...JSON.parse(s)); } catch {}
-          for (const item of fbSales) {
-            if (!item.localDate) { try { (item as any).localDate = getLocalDateStr(new Date(item.date)); } catch {} }
-            if (!local.find(x => x.id === item.id)) local.push(item);
-          }
-          // BUG FIX: conservar TODAS las ventas locales, no solo las pendientes o en Firebase
-          // local = local.filter(item => isPendingId(PENDING.SALES, item.id) || fbSales.find(x => x.id === item.id));
-          fbSales.forEach(item => syncedSaleIds.current.add(item.id));
-          setSales(local); try { localStorage.setItem('pos-sales', JSON.stringify(local)); } catch {}
+        if (dbSales) {
+          const normalizadas = dedupeBySaleId(dbSales.map(item => (
+            item.localDate ? item : { ...item, localDate: getLocalDateStr(new Date(item.date)) }
+          )));
+          setSales(prev => unirPendientes(prev, normalizadas, PENDING.SALES));
         }
-        if (fbUsers) {
-          let local: AppUser[] = []; try { const s = localStorage.getItem('pos-users'); if (s) local.push(...JSON.parse(s)); } catch {}
-          for (const item of fbUsers) { if (!local.find(x => x.id === item.id)) local.push(item); }
-          local = local.filter(item => isPendingId(PENDING.USERS, item.id) || fbUsers.find(x => x.id === item.id));
-          setUsers(local); try { localStorage.setItem('pos-users', JSON.stringify(local)); } catch {}
-        }
-        if (fbCloses) {
-          let local: DailyClose[] = []; try { const s = localStorage.getItem('pos-daily-closes'); if (s) local.push(...JSON.parse(s)); } catch {}
-          for (const item of fbCloses) { if (!local.find(x => x.id === item.id)) local.push(item); }
-          local = local.filter(item => isPendingId(PENDING.CLOSES, item.id) || fbCloses.find(x => x.id === item.id));
-          setDailyCloses(local); try { localStorage.setItem('pos-daily-closes', JSON.stringify(local)); } catch {}
-        }
-        if (fbHistory) {
-          let local: StockHistoryItem[] = []; try { const s = localStorage.getItem('pos-stock-history'); if (s) local.push(...JSON.parse(s)); } catch {}
-          for (const item of fbHistory) { if (!local.find(x => x.id === item.id)) local.push(item); }
-          local = local.filter(item => isPendingId(PENDING.HISTORY, item.id) || fbHistory.find(x => x.id === item.id));
-          fbHistory.forEach(item => syncedHistoryIds.current.add(item.id));
-          setStockHistory(local); try { localStorage.setItem('pos-stock-history', JSON.stringify(local)); } catch {}
-        }
-      } catch {}
+        if (dbUsers) setUsers(dbUsers);
+        if (dbCloses) setDailyCloses(prev => unirPendientes(prev, dbCloses, PENDING.CLOSES));
+        if (dbHistory) setStockHistory(prev => unirPendientes(prev, dbHistory, PENDING.HISTORY));
+      } catch {
+      } finally {
+        setCargando(null);
+      }
     })();
   }, []);
 
@@ -843,6 +1019,7 @@ const Index = () => {
       try { const s = localStorage.getItem('pos-sales'); if (s) local.push(...JSON.parse(s)); } catch {}
       for (const s of fb) { if (!s.localDate) { try { (s as any).localDate = getLocalDateStr(new Date(s.date)); } catch {} } }
       fb.forEach(item => syncedSaleIds.current.add(item.id));
+      const fbIds = new Set(fb.map(x => x.id));
       let merged: Sale[] = [...local];
       for (const item of fb) {
         const idx = merged.findIndex(x => x.id === item.id);
@@ -856,12 +1033,21 @@ const Index = () => {
         }
       }
       for (const item of local) {
-        if (!fb.find(x => x.id === item.id) && isPendingId(PENDING.SALES, item.id)) {
-          createSale(item.id, stripUndefined(item)).then(() => removePendingId(PENDING.SALES, item.id)).catch(e => { console.error('ERROR subMerge createSale:', e); });
+        if (!fb.find(x => x.id === item.id) && isPendingId(PENDING.SALES, item.id) && !ventasEnviandoseRef.current.has(item.id)) {
+          ventasEnviandoseRef.current.add(item.id);
+          createSale(item.id, stripUndefined(item))
+            .then(() => removePendingId(PENDING.SALES, item.id))
+            .catch(e => { console.error('ERROR subMerge createSale:', e); })
+            .finally(() => ventasEnviandoseRef.current.delete(item.id));
         }
       }
-      // BUG FIX: conservar TODAS las ventas locales en el merge, no solo las pendientes o en Firebase
-      // merged = merged.filter(item => isPendingId(PENDING.SALES, item.id) || fb.find(x => x.id === item.id));
+      // Las ventas locales solo cuentan mientras estan pendientes de envio a
+      // Supabase. Al confirmarse, la unica version real tiene el id de la base;
+      // conservar la copia local con id temporal era lo que generaba VENTAS
+      // DUPLICADAS en "Ventas del Día" (misma venta, dos ids).
+      // dedupeBySaleId: una sola fila por id (prefiere la canonica que llego al final).
+      merged = dedupeBySaleId(merged);
+      merged = merged.filter(item => fbIds.has(item.id) || isPendingId(PENDING.SALES, item.id));
       setSales(merged);
       try { localStorage.setItem('pos-sales', JSON.stringify(merged)); } catch {}
     };
@@ -963,12 +1149,23 @@ const Index = () => {
   const usersRef = useRef(users);
   useEffect(() => { usersRef.current = users; }, [users]);
   useEffect(() => {
-    const unsubscribe = onAuthChange(async (user) => {
+    const unsubscribe = onAuthChange(async (user, evento) => {
+      if (evento === 'PASSWORD_RECOVERY') {
+        // Llego el enlace de recuperacion: pedir la nueva contrasena antes de entrar.
+        setShowResetPasswordForm(true);
+        setIsAuthenticated(false);
+        setFirebaseUser(null);
+        if (!authInitializedRef.current) {
+          authInitializedRef.current = true;
+          setAuthInitialized(true);
+        }
+        return;
+      }
       if (user) {
         let found = false;
         try {
           let profile = await getUserByEmail(user.email);
-          if (!profile) profile = await getUserProfile(user.uid);
+          if (!profile) profile = await getUserProfile(user.id);
           if (profile) {
             setFirebaseUser(profile);
             setIsAuthenticated(true);
@@ -1034,54 +1231,25 @@ const Index = () => {
     const handleOnline = () => {
       setIsOnline(true);
       const syncData = async () => {
+        // Ya no hay cola offline que reenviar. Cada escritura va directo a
+        // Supabase; al volver la conexion basta recargar para ver lo nuevo.
+        // Reenviar la cola arrastraria datos viejos de localStorage.
+        autoCleanupLocal();
         try {
-          // Push pending sales
-          const pendingSalesIds: string[] = JSON.parse(localStorage.getItem(PENDING.SALES) || '[]');
-          for (const id of pendingSalesIds) {
-            try {
-              const allSales: Sale[] = JSON.parse(localStorage.getItem('pos-sales') || '[]');
-              const sale = allSales.find(s => s.id === id);
-              if (sale) { await createSale(id, stripUndefined(sale)); removePendingId(PENDING.SALES, id); }
-            } catch (e) { console.error('ERROR online-sync createSale:', e); }
-          }
-          // Push pending products
-          const pendingProductIds: string[] = JSON.parse(localStorage.getItem(PENDING.PRODUCTS) || '[]');
-          for (const id of pendingProductIds) {
-            try {
-              const allProducts: Product[] = JSON.parse(localStorage.getItem('pos-products') || '[]');
-              const product = allProducts.find(p => p.id === id);
-              if (product) { await createProduct(id, stripUndefined(product)); removePendingId(PENDING.PRODUCTS, id); }
-            } catch (e) { console.error('ERROR online-sync createProduct:', e); }
-          }
-          // Push pending users
-          const pendingUserIds: string[] = JSON.parse(localStorage.getItem(PENDING.USERS) || '[]');
-          for (const id of pendingUserIds) {
-            try {
-              const allUsers: AppUser[] = JSON.parse(localStorage.getItem('pos-users') || '[]');
-              const user = allUsers.find(u => u.id === id);
-              if (user) { await createLocalUser(id, stripUndefined(user)); removePendingId(PENDING.USERS, id); }
-            } catch (e) { console.error('ERROR online-sync createLocalUser:', e); }
-          }
-          // Push pending daily closes
-          const pendingCloseIds: string[] = JSON.parse(localStorage.getItem(PENDING.CLOSES) || '[]');
-          for (const id of pendingCloseIds) {
-            try {
-              const allCloses: DailyClose[] = JSON.parse(localStorage.getItem('pos-daily-closes') || '[]');
-              const close = allCloses.find(c => c.id === id);
-              if (close) { await createDailyClose(id, stripUndefined(close)); removePendingId(PENDING.CLOSES, id); }
-            } catch (e) { console.error('ERROR online-sync createDailyClose:', e); }
-          }
-          // Push pending stock history
-          const pendingHistoryIds: string[] = JSON.parse(localStorage.getItem(PENDING.HISTORY) || '[]');
-          for (const id of pendingHistoryIds) {
-            try {
-              const allHistory: StockHistoryItem[] = JSON.parse(localStorage.getItem('pos-stock-history') || '[]');
-              const item = allHistory.find(h => h.id === id);
-              if (item) { await createStockHistoryItem(id, stripUndefined(item)); removePendingId(PENDING.HISTORY, id); }
-            } catch (e) { console.error('ERROR online-sync createStockHistoryItem:', e); }
-          }
-          autoCleanupLocal();
-          toast({ title: "Modo online", description: "Datos sincronizados con la nube." });
+          const [p, s, c, h] = await Promise.all([
+            getAllProducts(), getAllSales(), getAllDailyCloses(), getAllStockHistory(),
+          ]);
+          // Merge, no reemplazo: si reemplazaramos, lo pendiente de subir
+          // desapareceria de la pantalla al volver la conexion.
+          setProducts(prev => unirPendientes(prev, p, PENDING.PRODUCTS));
+          setSales(prev => unirPendientes(prev, s, PENDING.SALES));
+          setDailyCloses(prev => unirPendientes(prev, c, PENDING.CLOSES));
+          setStockHistory(prev => unirPendientes(prev, h, PENDING.HISTORY));
+          void syncProductsToFirestore(p).then((ok) => {
+            if (ok) void syncHistoryToFirestore(h);
+          });
+          void syncClosesToFirestore(c);
+          toast({ title: "Modo online", description: "Datos sincronizados con Supabase." });
         } catch (e) { console.error('ERROR online-sync outer:', e); }
       };
       syncData();
@@ -1092,7 +1260,7 @@ const Index = () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, []);
+  }, [syncProductsToFirestore, syncHistoryToFirestore, syncClosesToFirestore]);
 
   // Eliminado: cambio forzado de tab al perder conexión
 
@@ -1122,11 +1290,14 @@ const Index = () => {
     };
   }, [checkStorage]);
 
+  const getLowStockThreshold = (product: Product) => {
+    if (product.type === 'peso') return 500;
+    if (product.type === 'metro') return 1000;
+    return 20;
+  };
+
   const lowStockProducts = useMemo(() => {
-    return products.filter(p => {
-      if (p.type === 'peso') return p.stock > 0 && p.stock <= 500;
-      return p.stock > 0 && p.stock <= 20;
-    });
+    return products.filter(p => p.stock > 0 && p.stock <= getLowStockThreshold(p));
   }, [products]);
 
   const currentStockHistoryProduct = useMemo(() => {
@@ -1141,18 +1312,29 @@ const Index = () => {
       return;
     }
     getStockHistoryByProduct(activeProductId)
-      .then(setModalProductHistory)
+      .then((db) => {
+        // Ademas de lo que ya esta en la base se muestra lo que acaba de
+        // registrarse y todavia viaja a Supabase: el modal nunca debe salir
+        // vacio justo despues de un alta o un restock. Tambien se incluyen los
+        // IDs que estan volando aunque su pendiente ya se haya quitado.
+        const enTransito = stockHistory.filter(
+          (h) => h.productId === activeProductId
+            && (isPendingId(PENDING.HISTORY, h.id) || historialEnVueloRef.current.has(h.id))
+            && !db.some((d) => d.id === h.id)
+        );
+        setModalProductHistory([...enTransito, ...db]);
+      })
       .catch((err) => {
         console.error('Error cargando historial del producto:', err);
         setModalProductHistory([]);
       });
-  }, [currentStockHistoryProduct, viewingMayoristaProduct]);
+  }, [currentStockHistoryProduct, viewingMayoristaProduct, stockHistory, tickHistorial]);
 
   const productStockHistoryEntries = useMemo(() => {
     if (!currentStockHistoryProduct) return [];
     return stockHistory
       .filter(item => item.productId === currentStockHistoryProduct.id)
-      .filter(item => item.type !== 'sale' || item.isSummary)
+      .filter(item => item.type !== 'price_change')
       .sort((a, b) => {
         const timeDiff = new Date(a.date).getTime() - new Date(b.date).getTime();
         if (Math.abs(timeDiff) > 5000) return timeDiff;
@@ -1165,9 +1347,16 @@ const Index = () => {
   const stockHistoryDisplayRows = useMemo<StockHistoryDisplayRow[]>(() => {
     const rows: StockHistoryDisplayRow[] = [];
 
-    productStockHistoryEntries.forEach((item, index) => {
-      if (item.type === 'sale') return;
+    // Movimiento en unidades generales (productos mayoristas usan la equivalencia del nivel).
+    const movementOf = (item: StockHistoryItem) => {
+      if (item.type === 'sale' && item.affectedLevelName) {
+        const level = currentStockHistoryProduct?.saleLevels?.find(l => l.name === item.affectedLevelName);
+        return item.quantity * (level?.baseUnitsContained ?? 1);
+      }
+      return item.quantity;
+    };
 
+    productStockHistoryEntries.forEach((item) => {
       if (item.type === 'initial') {
         rows.push({
           id: item.id,
@@ -1181,14 +1370,30 @@ const Index = () => {
         return;
       }
 
-      const previousItem = productStockHistoryEntries[index - 1];
-      const matchedSale = previousItem?.type === 'sale' && previousItem.isSummary ? previousItem : null;
+      if (item.type === 'sale') {
+        return;
+      }
+
+      // Reposición
+      const prevSale = productStockHistoryEntries
+        .filter(h => h.type === 'sale' && h.isSummary)
+        .find(h => Math.abs(new Date(h.date).getTime() - new Date(item.date).getTime()) < 5000);
+
+      const saleMatch = productStockHistoryEntries
+        .filter(h => h.type === 'sale' && h.isSummary && new Date(h.date).getTime() < new Date(item.date).getTime())
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+
+      let soldQty: number | null = null;
+      const saleEntry = prevSale || saleMatch;
+      if (saleEntry) {
+        soldQty = movementOf(saleEntry);
+      }
 
       rows.push({
         id: item.id,
         date: item.date,
         stockActual: item.resultingStock - item.quantity,
-        soldQuantity: matchedSale?.quantity ?? null,
+        soldQuantity: soldQty,
         addedQuantity: item.quantity,
         resultingStock: item.resultingStock,
         isInitial: false
@@ -1196,7 +1401,7 @@ const Index = () => {
     });
 
     return rows.reverse();
-  }, [productStockHistoryEntries]);
+  }, [productStockHistoryEntries, currentStockHistoryProduct]);
 
   const stockHistoryCurrentDate = new Date().toLocaleDateString('es-PE');
   
@@ -1231,7 +1436,10 @@ const Index = () => {
     const newHistoryItems: StockHistoryItem[] = [];
     
     const updatedProducts = products.map(p => {
-      const restockAmount = parseInt(restockQuantities[p.id] || '0');
+      const rawRestock = restockQuantities[p.id] || '0';
+      const restockAmount = p.type === 'metro'
+        ? Math.round((parseFloat(normalizeDecimalInput(rawRestock)) || 0) * 100)
+        : parseInt(rawRestock);
       if (restockAmount > 0) {
         const lastBaseEntry = getLastStockBaseEntry(p.id);
         const isFirstEntry = !lastBaseEntry;
@@ -1242,6 +1450,7 @@ const Index = () => {
         let updatedProduct: Product;
         let isLevelBased = p.type === 'mayorista' || (p.type === 'unidad' && p.saleLevels?.length);
         let unitsInMin = 0;
+        let restockLevelName: string | undefined;
 
         if (p.type === 'mayorista' && p.saleLevels?.length) {
           const sortedLevels = [...p.saleLevels].sort((a, b) => { if (a.name === 'Unidad') return -1; if (b.name === 'Unidad') return 1; return a.baseUnitsContained - b.baseUnitsContained; });
@@ -1256,6 +1465,7 @@ const Index = () => {
           }
           unitsInMin = Math.floor(restockAmount / minLevel.baseUnitsContained);
           if (unitsInMin > 0) {
+            restockLevelName = minLevel.name;
             const updatedLevels = p.saleLevels.map(l =>
               l.name === minLevel.name ? { ...l, stock: l.stock + unitsInMin, initialStock: l.stock + unitsInMin } : l
             );
@@ -1263,6 +1473,19 @@ const Index = () => {
             updatedProduct = { ...p, saleLevels: updatedLevels, stock: newStock, initialStock: newStock };
           } else {
             newStock = p.stock + restockAmount;
+            updatedProduct = { ...p, stock: newStock };
+          }
+        } else if (p.type === 'unidad' && p.saleLevels?.length) {
+          // Modelo A: el stock general (unidades) y el nivel "Unidad" comparten el mismo stock.
+          newStock = p.stock + restockAmount;
+          if (p.saleLevels.some(l => l.name === 'Unidad')) {
+            unitsInMin = restockAmount;
+            restockLevelName = 'Unidad';
+            const updatedLevels = p.saleLevels.map(l =>
+              l.name === 'Unidad' ? { ...l, stock: l.stock + restockAmount, initialStock: l.stock + restockAmount } : l
+            );
+            updatedProduct = { ...p, stock: newStock, saleLevels: updatedLevels };
+          } else {
             updatedProduct = { ...p, stock: newStock };
           }
         } else {
@@ -1310,8 +1533,8 @@ const Index = () => {
           quantity: restockAmount,
           resultingStock: newStock,
           date: new Date().toISOString(),
-          affectedLevelName: isLevelBased ? (p.saleLevels?.[0]?.name) : undefined,
-          levelQuantity: isLevelBased ? unitsInMin : undefined,
+          affectedLevelName: restockLevelName,
+          levelQuantity: restockLevelName ? unitsInMin : undefined,
           levelStockAfter
         });
           return updatedProduct;
@@ -1341,7 +1564,9 @@ const Index = () => {
   const handleAddStockHistoryRestock = () => {
     if (!currentStockHistoryProduct) return;
 
-    const restockAmount = parseInt(stockHistoryRestockQuantity || '0');
+    const restockAmount = currentStockHistoryProduct.type === 'metro'
+      ? Math.round((parseFloat(normalizeDecimalInput(stockHistoryRestockQuantity)) || 0) * 100)
+      : parseInt(stockHistoryRestockQuantity || '0');
     if (!restockAmount || restockAmount <= 0) {
       toast({
         title: "Cantidad inválida",
@@ -1439,6 +1664,7 @@ const Index = () => {
 
   const handleMigrateImages = async () => {
     setIsMigrating(true);
+    setCargando('Migrando imágenes…');
     const productsWithBase64 = products.filter(p => p.imageUrl && p.imageUrl.startsWith('data:'));
     let success = 0, errors = 0;
     let updatedProducts = [...products];
@@ -1459,6 +1685,7 @@ const Index = () => {
     }
     toast({ title: "Migración completada", description: `Éxito: ${success}, Errores: ${errors}` });
     setIsMigrating(false);
+    setCargando(null);
   };
 
   // Funciones para modal de peso
@@ -1653,6 +1880,101 @@ const Index = () => {
     });
   };
 
+  const handleMetroQuantityChange = (centimeters: number, quantity: number) => {
+    setMetroQuantities(prev => {
+      const next = { ...prev };
+      if (quantity <= 0) delete next[String(centimeters)];
+      else next[String(centimeters)] = quantity;
+      return next;
+    });
+    if (quantity > 0) setCustomMeters('');
+  };
+
+  const handleAddMetroToCart = () => {
+    if (!selectedMetroProduct) return;
+
+    const pricePerMeter = selectedMetroProduct.salePrice ?? 0;
+
+    if (metroInputMode === 'money' && pricePerMeter <= 0) {
+      toast({
+        title: "Precio no válido",
+        description: "Este producto no tiene precio por metro; usa el modo por longitud",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    let totalCm = 0;
+
+    Object.entries(metroQuantities).forEach(([centimeters, quantity]) => {
+      totalCm += Number(centimeters) * quantity;
+    });
+
+    if (metroInputMode === 'meters') {
+      const meters = parseFloat(normalizeDecimalInput(customMeters));
+      if (Number.isFinite(meters) && meters > 0) totalCm += Math.round(meters * 100);
+    } else {
+      const money = parseFloat(normalizeDecimalInput(customMetroMoney));
+      if (Number.isFinite(money) && money > 0) {
+        totalCm += Math.round((money / pricePerMeter) * 100);
+      }
+    }
+
+    if (totalCm <= 0) {
+      toast({
+        title: "Entrada requerida",
+        description: "Selecciona una longitud o ingresa un monto válido para agregar al carrito",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    if (totalCm > selectedMetroProduct.stock) {
+      toast({
+        title: "Stock insuficiente",
+        description: `Solo hay ${formatLength(selectedMetroProduct.stock)} disponibles`,
+        variant: "destructive"
+      });
+      return;
+    }
+
+    const tempProduct: Product = {
+      ...selectedMetroProduct,
+      salePrice: pricePerMeter,
+      stock: totalCm,
+    };
+
+    const existingItem = currentSale.find(item => item.product.id === selectedMetroProduct.id);
+
+    if (existingItem) {
+      const newQuantity = existingItem.quantity + totalCm;
+      if (newQuantity <= selectedMetroProduct.stock) {
+        actualizarCantidad(selectedMetroProduct.id, newQuantity);
+      } else {
+        toast({
+          title: "Stock insuficiente",
+          description: `Solo hay ${formatLength(selectedMetroProduct.stock)} disponibles`,
+          variant: "destructive"
+        });
+        return;
+      }
+    } else {
+      setCurrentSale([...currentSale, { product: tempProduct, quantity: totalCm }]);
+    }
+
+    setIsMetroModalOpen(false);
+    setSelectedMetroProduct(null);
+    setMetroQuantities({});
+    setCustomMeters('');
+    setCustomMetroMoney('');
+    setMetroInputMode('meters');
+
+    toast({
+      title: "Producto agregado",
+      description: `${formatLength(totalCm)} de ${selectedMetroProduct.name} agregado al carrito`,
+    });
+  };
+
   const handleLogin = async () => {
     if (!loginEmail || !password) {
       toast({
@@ -1664,6 +1986,7 @@ const Index = () => {
     }
 
     setIsAuthLoading(true);
+    setCargando('Verificando credenciales…');
 
     try {
       await loginWithEmail(loginEmail, password);
@@ -1676,59 +1999,65 @@ const Index = () => {
       });
     } finally {
       setIsAuthLoading(false);
+      setCargando(null);
     }
   };
 
-  const handleGoogleLogin = async () => {
-    setIsAuthLoading(true);
+  const handleForgotPassword = async () => {
+    const correo = loginEmail.trim();
+    if (!correo) {
+      toast({
+        title: "Escribe tu correo primero",
+        description: "Pon tu correo en el formulario para enviarte el enlace de recuperación.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setIsRecuperando(true);
     try {
-      const firebaseUser = await loginWithGoogle();
-      const userEmail = firebaseUser.email || '';
-      
-      let registeredUsers = users;
-      if (registeredUsers.length === 0) {
-        try { registeredUsers = await getAllLocalUsers(); } catch {}
-      }
-      const registeredUser = registeredUsers.find(u => u.email === userEmail);
-      if (!registeredUser) {
-        await firebaseLogout();
-        toast({
-          title: "Acceso denegado",
-          description: "No tienes acceso al sistema. Contacta al administrador.",
-          variant: "destructive"
-        });
-        return;
-      }
-      
-      const profile = await getUserProfile(firebaseUser.uid);
-      if (!profile) {
-        const newProfile: Omit<UserProfile, 'uid'> = {
-          email: userEmail,
-          name: registeredUser.name,
-          role: registeredUser.role,
-          createdAt: new Date().toISOString(),
-          isActive: true,
-        };
-        await createUserProfile(firebaseUser.uid, newProfile);
-        setFirebaseUser({ ...newProfile, uid: firebaseUser.uid });
-      } else {
-        setFirebaseUser({ ...profile, uid: firebaseUser.uid });
-      }
-      setIsAuthenticated(true);
-      setUserRole(registeredUser.role);
+      await enviarResetPassword(correo);
+      toast({
+        title: "Correo enviado",
+        description: `Revisa ${correo}: llegó un enlace para crear una nueva contraseña.`,
+      });
     } catch (err: unknown) {
-      if (err instanceof Error && err.message?.includes('popup-closed-by-user')) {
-        return;
-      }
-      const msg = err instanceof Error ? err.message : "Error al iniciar sesión con Google";
-      toast({ title: "Error", description: msg, variant: "destructive" });
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      toast({ title: "No se pudo enviar el enlace", description: msg, variant: "destructive" });
     } finally {
-      setIsAuthLoading(false);
+      setIsRecuperando(false);
+    }
+  };
+
+  const handleGuardarNuevaPassword = async () => {
+    if (nuevaPassword.length < 6) {
+      toast({ title: "Contraseña muy corta", description: "Usa al menos 6 caracteres.", variant: "destructive" });
+      return;
+    }
+    if (nuevaPassword !== nuevaPassword2) {
+      toast({ title: "No coinciden", description: "La confirmación no coincide con la nueva contraseña.", variant: "destructive" });
+      return;
+    }
+    setIsRecuperando(true);
+    try {
+      await cambiarPassword(nuevaPassword);
+      await firebaseLogout();
+      setShowResetPasswordForm(false);
+      setNuevaPassword('');
+      setNuevaPassword2('');
+      toast({
+        title: "Contraseña actualizada",
+        description: "Ahora inicia sesión con tu nueva contraseña.",
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      toast({ title: "No se pudo actualizar", description: msg, variant: "destructive" });
+    } finally {
+      setIsRecuperando(false);
     }
   };
 
   const handleForceSync = async () => {
-    toast({ title: "Sincronizando...", description: "Obteniendo datos desde Firebase" });
+    toast({ title: "Sincronizando...", description: "Obteniendo datos desde Supabase" });
     try {
       const [fbProducts, fbSales, fbUsers, fbCloses, fbHistory] = await Promise.all([
         getAllProducts().catch(() => null as any),
@@ -1767,9 +2096,9 @@ const Index = () => {
         setStockHistory(local); try { localStorage.setItem('pos-stock-history', JSON.stringify(local)); } catch {}
         fbHistory.forEach(item => syncedHistoryIds.current.add(item.id));
       }
-      toast({ title: "Sincronización completa", description: "Datos actualizados desde Firebase" });
+      toast({ title: "Sincronización completa", description: "Datos actualizados desde Supabase" });
     } catch {
-      toast({ title: "Error de sincronización", description: "No se pudo conectar con Firebase", variant: "destructive" });
+      toast({ title: "Error de sincronización", description: "No se pudo conectar con Supabase", variant: "destructive" });
     }
   };
 
@@ -1796,6 +2125,16 @@ const Index = () => {
       setWeightQuantities({});
       setCustomWeight('');
       setIsWeightModalOpen(true);
+      return;
+    }
+
+    if (product.type === 'metro') {
+      setSelectedMetroProduct(product);
+      setMetroQuantities({});
+      setCustomMeters('');
+      setCustomMetroMoney('');
+      setMetroInputMode('meters');
+      setIsMetroModalOpen(true);
       return;
     }
 
@@ -1861,7 +2200,9 @@ const Index = () => {
         title: "Stock insuficiente",
         description: product.type === 'peso'
           ? `Solo hay ${formatWeight(product.stock)} disponibles`
-          : `Solo hay ${product.stock} unidades disponibles`,
+          : product.type === 'metro'
+            ? `Solo hay ${formatLength(product.stock)} disponibles`
+            : `Solo hay ${product.stock} unidades disponibles`,
         variant: "destructive"
       });
       return;
@@ -1911,6 +2252,9 @@ const Index = () => {
       if (item.product.type === 'peso') {
         return total + ((item.product.salePricePerKg || 0) * (item.quantity / 1000));
       }
+      if (item.product.type === 'metro') {
+        return total + ((item.product.salePrice || 0) * (item.quantity / 100));
+      }
       const level = item.selectedLevelName ? item.product.saleLevels?.find(l => l.name === item.selectedLevelName) : undefined;
       const price = level?.salePrice ?? item.product.salePrice ?? 0;
       return total + (price * item.quantity);
@@ -1957,6 +2301,11 @@ const Index = () => {
     }
   };
 
+  const formatLength = (cm: number) => {
+    if (cm === undefined || isNaN(cm)) return '0.00 m';
+    return `${(cm / 100).toFixed(2)} m`;
+  };
+
   const confirmarVenta = async () => {
     if (currentSale.length === 0) {
       toast({
@@ -1977,6 +2326,10 @@ const Index = () => {
         const totalKg = item.quantity / 1000;
         const profitPerKg = (item.product.salePricePerKg || 0) - (item.product.purchasePricePerKg || 0);
         return total + (profitPerKg * totalKg);
+      }
+      if (item.product.type === 'metro') {
+        const totalMeters = item.quantity / 100;
+        return total + (((item.product.salePrice || 0) - (item.product.purchasePrice || 0)) * totalMeters);
       }
       const level = item.selectedLevelName ? item.product.saleLevels?.find(l => l.name === item.selectedLevelName) : undefined;
       const salePrice = level?.salePrice ?? item.product.salePrice ?? 0;
@@ -2105,7 +2458,9 @@ const Index = () => {
             title: "Stock insuficiente",
             description: product.type === 'peso'
               ? `${product.name}: solo quedan ${formatWeight(product.stock)}`
-              : `${product.name}: solo quedan ${product.stock} unidades`,
+              : product.type === 'metro'
+                ? `${product.name}: solo quedan ${formatLength(product.stock)}`
+                : `${product.name}: solo quedan ${product.stock} unidades`,
             variant: "destructive"
           });
           return;
@@ -2164,6 +2519,9 @@ const Index = () => {
             salePrice: item.product.salePrice,
             purchasePrice: item.product.purchasePrice,
             type: item.product.type,
+            stock: item.product.stock,
+            initialStock: item.product.initialStock,
+            category: item.product.category,
             salePricePerKg: item.product.salePricePerKg,
             purchasePricePerKg: item.product.purchasePricePerKg
           }
@@ -2209,16 +2567,46 @@ const Index = () => {
       description: `Venta por S/ ${totalRedondeado.toFixed(2)} registrada exitosamente`,
     });
 
-    imprimirTicket(newSale);
+    imprimirTicket(newSale, sales.length + 1);
 
     // Intentar sync a Firebase directo (tiempo real); quitar "EN CAMINO" al confirmar
+    ventasEnviandoseRef.current.add(newSale.id);
     createSale(newSale.id, stripUndefined(newSale))
-      .then(() => removePendingId(PENDING.SALES, newSale.id))
-      .catch(e => { console.error('ERROR createSale:', e); addPendingId(PENDING.SALES, newSale.id); });
+      .then((ventaGuardada: Sale) => {
+        removePendingId(PENDING.SALES, newSale.id);
+        // Refresca el modal de información de producto si está abierto: la venta
+        // recién insertada por el RPC debe verse de inmediato en el registro.
+        setTickHistorial(t => t + 1);
+        // La venta real de Supabase tiene su propio id (e items). Reemplazar la
+        // copia local (id temporal) para que nunca aparezca duplicada en "Ventas del Día".
+        setSales(prev => dedupeBySaleId(prev.map(s => s.id === newSale.id ? ventaGuardada : s)));
+        try {
+          const lista = JSON.parse(localStorage.getItem('pos-sales') || '[]');
+          if (Array.isArray(lista)) {
+            const limpia = lista.filter((x: any) => x?.id !== newSale.id).concat(ventaGuardada);
+            safeSetItem('pos-sales', JSON.stringify(limpia));
+          }
+        } catch {}
+      })
+      .catch(e => { console.error('ERROR createSale:', e); addPendingId(PENDING.SALES, newSale.id); })
+      .finally(() => ventasEnviandoseRef.current.delete(newSale.id));
     Promise.all([
-      ...productsToUpdate.map(p => updateProduct(p.id, stripUndefined({ stock: p.stock, salePrice: p.salePrice, purchasePrice: p.purchasePrice, saleLevels: p.saleLevels }))
-        .then(() => removePendingId(PENDING.PRODUCTS, p.id))
-        .catch(e => { console.error('ERROR updateProduct:', e); addPendingId(PENDING.PRODUCTS, p.id); })),
+      ...productsToUpdate.map(p => {
+        const updateData: any = {};
+        if (p.salePrice !== undefined) updateData.salePrice = p.salePrice;
+        if (p.purchasePrice !== undefined) updateData.purchasePrice = p.purchasePrice;
+        if (p.saleLevels !== undefined) updateData.saleLevels = p.saleLevels;
+        if (p.category !== undefined) updateData.category = p.category;
+        if (p.imageUrl !== undefined) updateData.imageUrl = p.imageUrl;
+        if (p.name !== undefined) updateData.name = p.name;
+        if (Object.keys(updateData).length === 0) {
+          removePendingId(PENDING.PRODUCTS, p.id);
+          return Promise.resolve();
+        }
+        return updateProduct(p.id, stripUndefined(updateData))
+          .then(() => removePendingId(PENDING.PRODUCTS, p.id))
+          .catch(e => { console.error('ERROR updateProduct:', e); addPendingId(PENDING.PRODUCTS, p.id); });
+      }),
       ...productsToCreate.map(p => createProduct(p.id, stripUndefined(p))
         .then(() => removePendingId(PENDING.PRODUCTS, p.id))
         .catch(e => { console.error('ERROR createProduct:', e); addPendingId(PENDING.PRODUCTS, p.id); })),
@@ -2275,13 +2663,16 @@ const Index = () => {
     const nombre = item.product.name;
     let result = '';
     if (item.product.type === 'peso') {
-      const kgDisplay = item.quantity >= 1000
-        ? `${(item.quantity / 1000).toFixed(3)}kg`
-        : `${item.quantity}g`;
+      const kgDisplay = formatearPeso(item.quantity);
       const precioUnitario = item.product.salePricePerKg || 0;
       const totalItem = precioUnitario * (item.quantity / 1000);
       result += `${nombre}\n`;
       result += `       ${kgDisplay} x S/ ${precioUnitario.toFixed(2)}/kg = S/ ${totalItem.toFixed(2).padStart(7)}`;
+    } else if (item.product.type === 'metro') {
+      const precioUnitario = item.product.salePrice || 0;
+      const totalItem = precioUnitario * (item.quantity / 100);
+      result += `${nombre}\n`;
+      result += `       ${formatLength(item.quantity)} x S/ ${precioUnitario.toFixed(2)}/m = S/ ${totalItem.toFixed(2).padStart(7)}`;
     } else if (item.product.type === 'mayorista') {
       const nivel = item.selectedLevelName || 'Und';
       const cantDisplay = `${item.quantity} ${nivel}(s)`;
@@ -2300,7 +2691,7 @@ const Index = () => {
     return result;
   };
 
-  const generarBoletaHTML = (venta: Sale, previewMode = false) => {
+  const generarBoletaHTML = (venta: Sale, previewMode = false, numeroTicket?: number) => {
     const fecha = new Date(venta.date);
     const fechaStr = fecha.toLocaleDateString('es-PE');
     const horaStr = fecha.toLocaleTimeString('es-PE', { hour: 'numeric', minute: '2-digit', hour12: true });
@@ -2344,17 +2735,22 @@ const Index = () => {
     const bodyContent = `
   ${logoHtml}
   <div class="header">
-    <div class="empresa">DISTRIBUIDORA MILAM S.AC</div>
-    <div class="ruc">RUC 20614583968</div>
-    <div class="direccion">CLL JUAN MATA NRO.1040 ICA - NASCA - NASCA</div>
-    <div class="celular">CEL: 917959299 - 964264293</div>
+    <div class="empresa">${(emisorForm.razonSocial || EMPRESA.razonSocial || 'FERRETERIA EBENEZER').toUpperCase()}</div>
+    <div class="ruc">${(emisorForm.ruc || EMPRESA.ruc) ? `RUC ${(emisorForm.ruc || EMPRESA.ruc)}` : ''}</div>
+    <div class="direccion">${emisorForm.direccion || EMPRESA.direccion || ''}</div>
+    <div class="celular">${(() => {
+      const t1 = (emisorForm.telefono || EMPRESA.telefono || '998315845').trim();
+      const t2 = ((emisorForm as any).telefono2 || (EMPRESA as any).telefono2 || '983746124').trim();
+      const tels = t2 ? `${t1} / ${t2}` : t1;
+      return tels ? `CEL: ${tels}` : (t1 ? `CEL: ${t1}` : '');
+    })()}</div>
   </div>
 
-  <div class="ticket-title">BOLETA DE VENTA</div>
+  <div class="ticket-title">TICKET DE COMPRA</div>
 
   <div class="divider"></div>
 
-  <div class="info-line"><span>ID:</span><span>${venta.id}</span></div>
+  <div class="info-line"><span>ID:</span><span>#${numeroTicket ?? ticketNumberOf(venta.id)}</span></div>
   <div class="info-line"><span>Emisión:</span><span>${fechaStr} ${horaStr}</span></div>
 
   <div class="divider"></div>
@@ -2453,10 +2849,136 @@ const Index = () => {
 </html>`;
   };
 
-  const imprimirPorNavegador = (venta: Sale) => {
+  const imprimirHTML = (html: string) => {
+    const w = window.open('', 'PRINT', 'height=900,width=760');
+    if (!w) return;
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+
+    // El HTML del comprobante carga Tailwind desde CDN y el QR es una imagen
+    // data-URL. Si se llama print() demasiado pronto la ventana aun esta en
+    // blanco (solo el <title>) y el PDF sale vacio. Se espera al evento load
+    // y se deja un margen extra para que el navegador pinte.
+    let impreso = false;
+    const lanzar = () => {
+      if (impreso) return;
+      impreso = true;
+      setTimeout(() => {
+        try {
+          w.focus();
+          w.print();
+        } catch { /* ventana cerrada por el usuario */ }
+      }, 600);
+    };
+
+    if (w.document.readyState === 'complete') {
+      lanzar();
+    } else {
+      w.addEventListener('load', lanzar, { once: true });
+    }
+    // Red de seguridad: si load nunca dispara (CDN bloqueado), imprimir igual.
+    setTimeout(lanzar, 4000);
+  };
+
+  const generarComprobanteElectronicoHTML = async (params: {
+    tipoDocumento: '01' | '03';
+    numero: string;
+    fecha: string;
+    emisor: Emisor | null;
+    cliente: Cliente | null;
+    venta: Sale;
+    igvRate: number;
+    logo?: string;
+    xmlUrl?: string;
+    pdfUrl?: string;
+  }): Promise<string> => {
+    const { tipoDocumento, numero, fecha, emisor, cliente, venta, igvRate } = params;
+    const logo = params.logo || emisor?.logoUrl || companyLogo;
+    const xmlUrl = params.xmlUrl;
+    const pdfUrl = params.pdfUrl;
+    const esFactura = tipoDocumento === '01';
+    const titulo = esFactura ? 'FACTURA ELECTRÓNICA' : 'BOLETA DE VENTA ELECTRÓNICA';
+    const serieCorrelativo = numero || '';
+    const fechaEmision = new Date(fecha);
+    const fechaStr = isNaN(fechaEmision.getTime())
+      ? new Date().toLocaleDateString('es-PE')
+      : fechaEmision.toLocaleDateString('es-PE');
+    const fechaVenc = fechaStr;
+
+    const total = Number(venta.total) || 0;
+    const tasa = Number(igvRate) || 18;
+    // SUBTOTAL = suma de los importes de linea SIN IGV (V/U x cantidad).
+    // IGV = lo que falta para llegar al total cobrado, asi el cuadre es exacto.
+    const subtotalSinIgv = venta.items.reduce((sum, item) => {
+      const cantidad = item.product.type === 'peso' ? item.quantity / 1000
+        : item.product.type === 'metro' ? item.quantity / 100
+        : Number(item.quantity) || 0;
+      const precio = Number(item.product.salePrice || 0);
+      return sum + (precio / (1 + tasa / 100)) * cantidad;
+    }, 0);
+    const base = venta.items.length > 0
+      ? Math.round(subtotalSinIgv * 100) / 100
+      : (Number(venta.subtotal) || total / (1 + tasa / 100));
+    const igv = Math.round((total - base) * 100) / 100;
+    const gravada = base;
+
+    const nombreCliente = cliente ? cliente.razonSocial : 'CLIENTES VARIOS';
+    const rucCliente = cliente ? cliente.numeroDocumento : '-';
+    const dirCliente = cliente?.direccion || '-';
+
+    const logoHtml = logo
+      ? `<img src="${logo}" alt="Logo" style="max-height:64px;max-width:180px;object-fit:contain" />`
+      : '';
+
+    const filasItems = venta.items.map((item, idx) => {
+      let cant: number;
+      let um = 'NIU';
+      let desc = item.product.name || '';
+      if (item.product.type === 'peso') {
+        cant = Number((item.quantity / 1000).toFixed(3));
+        um = 'KGM';
+      } else if (item.product.type === 'metro') {
+        cant = Number((item.quantity / 100).toFixed(2));
+        um = 'MTR';
+      } else {
+        cant = Number(item.quantity) || 0;
+        um = 'NIU';
+      }
+      if (item.selectedLevelName) {
+        desc = desc + ' (' + item.selectedLevelName + ')';
+      }
+      const pu = Number(item.product.salePrice || 0);
+      // V/U es el valor unitario SIN IGV (convencion SUNAT); P/U es con IGV.
+      const valorUnitario = pu / (1 + (Number(igvRate) || 18) / 100);
+      const importe = Number((pu * cant).toFixed(2));
+      return `<tr class="h-6"><td class="text-center py-1">${cant}</td><td class="text-center py-1">${escapeHtml(um)}</td><td class="text-left py-1">${escapeHtml(desc)}</td><td class="text-right py-1">${valorUnitario.toFixed(3)}</td><td class="text-right py-1">${pu.toFixed(3)}</td><td class="text-right py-1 pr-2">${importe.toFixed(2)}</td></tr>`;
+    }).join('');
+
+    // Cadena del QR segun especificacion SUNAT
+    const qrContenido = [
+      emisor?.ruc || '',
+      tipoDocumento,
+      (serieCorrelativo.split('-')[0] || ''),
+      (serieCorrelativo.split('-')[1] || '0'),
+      igv.toFixed(2),
+      total.toFixed(2),
+      fechaStr,
+      cliente?.tipoDocumento || '',
+      rucCliente,
+      '',
+    ].join('|');
+    const qrDataUrl = await QRCode
+      .toDataURL(qrContenido, { width: 200, margin: 1, errorCorrectionLevel: 'M' })
+      .catch(() => '');
+
+    return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${titulo} - ${serieCorrelativo}</title><script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script><style>@media print{body{background:#fff!important;padding:0!important}.invoice-page{box-shadow:none!important;margin:0!important;width:100%!important;max-width:100%!important;border:none!important;padding:15mm!important}}.invoice-page{width:210mm;min-height:297mm;box-sizing:border-box;font-family:Arial,Helvetica,sans-serif}.qr-container{width:110px;height:110px;padding:6px;background:white;border:1px solid #94a3b8;border-radius:4px}</style></head><body class="bg-slate-700 min-h-screen py-8 text-neutral-900 flex flex-col items-center"><main class="invoice-page bg-white shadow-2xl p-12 text-[10px] leading-tight flex flex-col justify-between"><div><section class="flex justify-between items-start mb-6"><div class="w-[62%] pr-4"><div class="mb-2"><div class="flex items-center"><span class="text-3xl font-extrabold tracking-tight text-[#4F46E5]">FERRETERIA</span><span class="text-3xl font-extrabold tracking-tight text-[#3f454d]"> EBENEZER</span></div>${emisor?.nombreComercial ? `<p class="text-[9px] text-[#1c1c1c] mt-1">${escapeHtml(emisor.nombreComercial)}</p>` : ''}</div><div class="text-[9px] text-[#1c1c1c] space-y-0.5 mt-3"><p>Dirección: ${escapeHtml(emisor?.direccion||'-')}</p><p>Teléfono: ${escapeHtml(emisor?.telefono||'-')}</p></div></div><div class="w-[36%] border-[1.5px] border-neutral-400 bg-[#f4f4f4] rounded-2xl p-4 text-center flex flex-col justify-center items-center"><p class="text-sm font-bold">RUC ${escapeHtml(emisor?.ruc||'')}</p><p class="text-base font-extrabold my-1 uppercase">${titulo.replace('ELECTRÓNICA','<br>ELECTRÓNICA')}</p><p class="text-sm font-bold">${escapeHtml(serieCorrelativo)}</p></div></section><section class="grid grid-cols-12 gap-3 mb-4"><div class="col-span-8 border-[1.5px] border-neutral-400 rounded-xl p-3 text-[9px] min-h-[75px]"><p class="font-bold text-[9.5px] mb-1">DATOS DEL CLIENTE</p><div class="grid grid-cols-[100px_1fr] gap-y-0.5"><span class="font-bold">${esFactura?'RUC':'DNI/DOC'}</span><span>: ${escapeHtml(rucCliente)}</span><span class="font-bold">DENOMINACIÓN</span><span class="font-bold">: ${escapeHtml(nombreCliente)}</span><span class="font-bold">DIRECCIÓN</span><span>: ${escapeHtml(dirCliente)}</span></div></div><div class="col-span-4 border-[1.5px] border-neutral-400 rounded-xl p-3 text-[9px] min-h-[75px]"><div class="grid grid-cols-[85px_1fr] gap-y-1 pt-1"><span class="font-bold">FECHA EMISIÓN</span><span>: ${fechaStr}</span><span class="font-bold">FECHA DE VENC.</span><span>: ${fechaVenc}</span><span class="font-bold">MONEDA</span><span>: SOLES</span></div></div></section><section class="mb-3"><div class="w-full border-t border-b border-neutral-400"><table class="w-full border-collapse text-[9px]"><thead><tr class="bg-[#e9ecef] border-b border-neutral-400 text-neutral-800 font-bold uppercase text-center h-7"><th class="py-1 px-1.5 w-[7%]">CANT.</th><th class="py-1 px-1.5 w-[8%]">UM</th><th class="py-1 px-2 text-left w-[56%]">DESCRIPCIÓN</th><th class="py-1 px-1.5 w-[10%] text-right">V/U</th><th class="py-1 px-1.5 w-[10%] text-right">P/U</th><th class="py-1 px-2 w-[10%] text-right">IMPORTE</th></tr></thead><tbody class="divide-y divide-neutral-200">${filasItems}<tr class="h-5"><td colspan="6"></td></tr><tr class="h-5"><td colspan="6"></td></tr><tr class="h-5"><td colspan="6"></td></tr><tr class="h-5"><td colspan="6"></td></tr><tr class="h-5"><td colspan="6"></td></tr></tbody><tfoot><tr><td colspan="5" class="text-right font-bold py-0.5">SUBTOTAL</td><td class="text-right font-bold py-0.5 pr-2">S/ ${gravada.toFixed(2)}</td></tr><tr><td colspan="5" class="text-right font-bold py-0.5">IGV ${(igvRate||18).toFixed(2)} %</td><td class="text-right font-bold py-0.5 pr-2">S/ ${igv.toFixed(2)}</td></tr><tr><td colspan="5" class="text-right font-bold py-0.5 border-t border-neutral-300">TOTAL</td><td class="text-right font-bold py-0.5 pr-2 border-t border-neutral-300 text-[10px]">S/ ${total.toFixed(2)}</td></tr></tfoot></table></div></section><section class="space-y-2.5 mb-5"><div class="border-[1.5px] border-neutral-400 rounded-lg px-3 py-1.5 text-center text-[9px] font-bold">IMPORTE EN LETRAS : ${numeroALetras(total)} SOLES</div>${xmlUrl ? `<div class="flex justify-center"><a href="${xmlUrl}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center px-3 py-1.5 rounded-lg border border-blue-500 text-blue-700 text-[9px] font-bold hover:bg-blue-50">Descargar XML</a></div>` : ''}</section></div><footer class="border-[1.5px] border-neutral-400 rounded-xl p-3 flex justify-between items-center"><div class="w-[74%] space-y-1.5 text-[8.5px]"><p>Representación impresa de la <span class="font-bold">${titulo}</span></p><p class="font-bold">Autorizado mediante Resolución de Intendencia</p></div><div class="w-[24%] flex justify-end"><div class="qr-container flex items-center justify-center">${qrDataUrl?'<img src="'+qrDataUrl+'" style="width:98px;height:98px" />':''}</div></div></footer></main></body></html>`;
+  };
+
+  const imprimirPorNavegador = (venta: Sale, numeroTicket?: number) => {
     const ventanaImpresion = window.open('', 'PRINT', 'height=800,width=400');
     if (ventanaImpresion) {
-      ventanaImpresion.document.write(generarBoletaHTML(venta));
+      ventanaImpresion.document.write(generarBoletaHTML(venta, false, numeroTicket));
       ventanaImpresion.document.close();
       ventanaImpresion.focus();
       setTimeout(() => {
@@ -2467,12 +2989,16 @@ const Index = () => {
 
   const formatearProductoTicketHTML = (item: any) => {
     const cantidad = item.product.type === 'peso' 
-      ? `${(item.quantity / 1000).toFixed(3)}kg`
-      : `${item.quantity}`;
+      ? formatearPeso(item.quantity)
+      : item.product.type === 'metro'
+        ? formatLength(item.quantity)
+        : `${item.quantity}`;
     const precio = (item.product.salePrice || 0).toFixed(2);
     let totalItem: number;
     if (item.product.type === 'peso') {
       totalItem = (item.product.salePricePerKg || 0) * (item.quantity / 1000);
+    } else if (item.product.type === 'metro') {
+      totalItem = (item.product.salePrice || 0) * (item.quantity / 100);
     } else {
       totalItem = (item.product.salePrice || 0) * item.quantity;
     }
@@ -2488,14 +3014,14 @@ const Index = () => {
     `;
   };
 
-  const imprimirTicket = async (venta: Sale) => {
+  const imprimirTicket = async (venta: Sale, numeroTicket?: number) => {
     if (useQzPrint) {
       try {
         const printers = qzConnected ? qzPrinters : await conectarQZTray();
         if (printers.length === 0) throw new Error('QZ Tray no conectado');
         const printerName = selectedQzPrinter || printers[0];
         if (!printerName) throw new Error('No hay impresora seleccionada');
-        const htmlData = generarBoletaHTML(venta);
+        const htmlData = generarBoletaHTML(venta, false, numeroTicket);
         const config = qz.configs.create(printerName, {
           orientation: 0,
           paperSize: { width: '80mm', height: 'auto' }
@@ -2509,10 +3035,10 @@ const Index = () => {
           description: "Usando impresión por navegador",
           variant: "destructive"
         });
-        imprimirPorNavegador(venta);
+        imprimirPorNavegador(venta, numeroTicket);
       }
     } else {
-      imprimirPorNavegador(venta);
+      imprimirPorNavegador(venta, numeroTicket);
     }
   };
 
@@ -2547,10 +3073,12 @@ const Index = () => {
     let imageUrl: string | undefined = undefined;
     const nuevoProductoId = generateId();
 
+    setCargando('Guardando producto…');
     if (newProductImage) {
       try {
         imageUrl = await uploadProductImage(newProductImage, nuevoProductoId);
       } catch (error) {
+        setCargando(null);
         toast({
           title: "Error al procesar imagen",
           description: "Ocurrió un error al procesar la imagen.",
@@ -2585,11 +3113,13 @@ const Index = () => {
     addPendingId(PENDING.PRODUCTS, producto.id);
     setProducts(updatedProducts);
     safeSetItem('pos-products', JSON.stringify(updatedProducts));
-    syncProductsToFirestore(updatedProducts);
     setStockHistory(updatedHistory);
     safeSetItem('pos-stock-history', JSON.stringify(updatedHistory));
     addPendingId(PENDING.HISTORY, updatedHistory[updatedHistory.length - 1].id);
-      syncHistoryToFirestore(updatedHistory);
+    // El historial se sube cuando el producto ya tiene su id real en la base:
+    // el movimiento apunta al producto por id y el temporal todavia no existe.
+    void syncProductsToFirestore(updatedProducts).then(() => syncHistoryToFirestore(updatedHistory));
+    setCargando(null);
     
     setNewProduct({ name: '', purchasePrice: 0, salePrice: 0, stock: 0, category: '' });
     setIsAddProductOpen(false);
@@ -2616,6 +3146,14 @@ const Index = () => {
       setEditPurchasePerKgInput(purchasePriceToUse.toFixed(2));
       setEditSalePerKgInput(salePriceToUse.toFixed(2));
       setIsEditWeightProductOpen(true);
+    } else if (product.type === 'metro') {
+      setEditingMetroProduct(product);
+      setEditMetroPurchaseInput((product.purchasePrice || 0).toFixed(2));
+      setEditMetroSaleInput((product.salePrice || 0).toFixed(2));
+      setEditMetroStockInput((product.stock / 100).toFixed(2));
+      setEditProductImage(null);
+      setEditProductImagePreview(product.imageUrl || '');
+      setIsEditMetroProductOpen(true);
     } else if (product.type === 'unidad' && product.saleLevels && product.saleLevels.length > 0) {
       editarProductoMayorista(product);
     } else {
@@ -2742,7 +3280,7 @@ const Index = () => {
         imageUrl,
         type: 'mayorista'
       } : p
-    );
+    ) as Product[];
     setProducts(updatedProducts);
     safeSetItem('pos-products', JSON.stringify(updatedProducts));
     addPendingId(PENDING.PRODUCTS, editingMayoristaProduct.id);
@@ -2758,7 +3296,8 @@ const Index = () => {
       if (JSON.stringify(updatedHistory) !== JSON.stringify(stockHistory)) {
         setStockHistory(updatedHistory);
         safeSetItem('pos-stock-history', JSON.stringify(updatedHistory));
-        addPendingId(PENDING.HISTORY, 'sync-' + editingMayoristaProduct.id);
+        const inicialEditado = updatedHistory.find(x => x.productId === editingMayoristaProduct.id && x.type === 'initial');
+        if (inicialEditado) addPendingId(PENDING.HISTORY, inicialEditado.id);
         syncHistoryToFirestore(updatedHistory);
       }
     }
@@ -2881,6 +3420,114 @@ const Index = () => {
     });
   };
 
+  const guardarEdicionProductoMetro = async () => {
+    if (!editingMetroProduct) return;
+
+    const purchasePrice = parseFloat(normalizeDecimalInput(editMetroPurchaseInput));
+    const salePrice = parseFloat(normalizeDecimalInput(editMetroSaleInput));
+    const stockCm = Math.round((parseFloat(normalizeDecimalInput(editMetroStockInput)) || 0) * 100);
+
+    if (!editingMetroProduct.name.trim()) {
+      toast({ title: "Nombre requerido", description: "El nombre del producto no puede estar vacío", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(purchasePrice) || purchasePrice <= 0) {
+      toast({ title: "Precio de compra inválido", description: "Debe ser mayor a 0", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(salePrice) || salePrice <= 0) {
+      toast({ title: "Precio de venta inválido", description: "Debe ser mayor a 0", variant: "destructive" });
+      return;
+    }
+    if (purchasePrice >= salePrice) {
+      toast({ title: "Precios inválidos", description: "El precio de compra debe ser menor al precio de venta", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(stockCm) || stockCm < 0) {
+      toast({ title: "Stock inválido", description: "El stock no puede ser negativo", variant: "destructive" });
+      return;
+    }
+
+    const oldProduct = products.find(p => p.id === editingMetroProduct.id);
+    const hasSales = stockHistory.some(h => h.productId === editingMetroProduct.id && h.type === 'sale');
+    if (hasSales && oldProduct && oldProduct.stock !== stockCm) {
+      toast({ title: "Stock bloqueado", description: "No puedes editar el stock después de haber ventas. Usa 'Restock' en el Historial de Stock para ajustar el inventario.", variant: "destructive" });
+      return;
+    }
+
+    let imageUrl = editingMetroProduct.imageUrl;
+
+    if (editProductImage) {
+      try {
+        imageUrl = await uploadProductImage(editProductImage, editingMetroProduct.id);
+      } catch (error) {
+        toast({
+          title: "Error al procesar imagen",
+          description: "Ocurrió un error al procesar la imagen",
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+
+    const updatedProduct: Product = {
+      ...editingMetroProduct,
+      imageUrl,
+      purchasePrice,
+      salePrice,
+      stock: stockCm,
+      initialStock: hasSales ? editingMetroProduct.initialStock : stockCm,
+    };
+
+    if (oldProduct) {
+      const oldSP = oldProduct.salePrice ?? 0;
+      const newSP = updatedProduct.salePrice ?? 0;
+      const oldPP = oldProduct.purchasePrice ?? 0;
+      const newPP = updatedProduct.purchasePrice ?? 0;
+      if (oldSP !== newSP || oldPP !== newPP) {
+        const priceChangeEntry: StockHistoryItem = {
+          id: generateId(),
+          productId: editingMetroProduct.id,
+          productName: editingMetroProduct.name,
+          type: 'price_change',
+          quantity: 0,
+          resultingStock: 0,
+          date: new Date().toISOString(),
+          priceChanges: [{
+            levelName: 'Metro',
+            oldSalePrice: oldSP,
+            newSalePrice: newSP,
+            oldPurchasePrice: oldPP,
+            newPurchasePrice: newPP
+          }]
+        };
+        const updatedHistory = [...stockHistory, priceChangeEntry];
+        setStockHistory(updatedHistory);
+        safeSetItem('pos-stock-history', JSON.stringify(updatedHistory));
+        addPendingId(PENDING.HISTORY, priceChangeEntry.id);
+        syncHistoryToFirestore(updatedHistory);
+      }
+    }
+
+    const updatedProducts = products.map(p =>
+      p.id === editingMetroProduct.id ? updatedProduct : p
+    );
+
+    setProducts(updatedProducts);
+    safeSetItem('pos-products', JSON.stringify(updatedProducts));
+    addPendingId(PENDING.PRODUCTS, editingMetroProduct.id);
+    syncProductsToFirestore(updatedProducts);
+    setIsEditMetroProductOpen(false);
+    setEditingMetroProduct(null);
+    setEditProductImage(null);
+    setEditProductImagePreview('');
+
+    toast({
+      title: "Producto actualizado",
+      description: "Los cambios se guardaron correctamente",
+    });
+  };
+
   const guardarEdicionProducto = async () => {
     if (!editingProduct) return;
 
@@ -2976,6 +3623,7 @@ const Index = () => {
 
   const verProductoMayorista = (product: Product) => {
     setViewingMayoristaProduct(product);
+    setInfoLevelTab(0);
     setIsViewMayoristaProductOpen(true);
   };
 
@@ -3002,20 +3650,10 @@ const Index = () => {
   };
 
   const deleteSelectedProducts = async () => {
-    if (!deleteProductPassword) {
+    if (!(await esAdminActual())) {
       toast({
-        title: "Error",
-        description: "Por favor ingresa la contraseña de administrador",
-        variant: "destructive"
-      });
-      return;
-    }
-
-    const isValidPassword = await isValidAdminPassword(deleteProductPassword, users);
-    if (!isValidPassword) {
-      toast({
-        title: "Contraseña incorrecta",
-        description: "La contraseña de administrador no es válida",
+        title: "Sin permiso",
+        description: "Solo un administrador puede eliminar productos",
         variant: "destructive"
       });
       return;
@@ -3039,7 +3677,6 @@ const Index = () => {
     setSelectedProductsToDelete([]);
     setIsDeleteMode(false);
     setIsDeleteConfirmOpen(false);
-    setDeleteProductPassword('');
     
     toast({
       title: "Productos eliminados",
@@ -3048,20 +3685,12 @@ const Index = () => {
   };
 
   const confirmDeleteProduct = async () => {
-    if (!productToDelete || !deleteProductPassword) {
-      toast({
-        title: "Error",
-        description: "Por favor ingresa la contraseña de administrador",
-        variant: "destructive"
-      });
-      return;
-    }
+    if (!productToDelete) return;
 
-    const isValidPassword = await isValidAdminPassword(deleteProductPassword, users);
-    if (!isValidPassword) {
+    if (!(await esAdminActual())) {
       toast({
-        title: "Contraseña incorrecta",
-        description: "La contraseña de administrador no es válida",
+        title: "Sin permiso",
+        description: "Solo un administrador puede eliminar productos",
         variant: "destructive"
       });
       return;
@@ -3072,6 +3701,7 @@ const Index = () => {
       setCurrentSale(currentSale.filter(item => item.product.id !== productToDelete.id));
     }
     removePendingId(PENDING.PRODUCTS, productToDelete.id);
+    setCargando('Eliminando producto…');
     try { await deleteProduct(productToDelete.id); } catch (e) { console.error('ERROR confirmDeleteProduct:', e); }
     const updatedProducts = products.filter(p => p.id !== productToDelete.id);
     setProducts(updatedProducts);
@@ -3081,10 +3711,10 @@ const Index = () => {
     setStockHistory(updatedHistory);
     safeSetItem('pos-stock-history', JSON.stringify(updatedHistory));
     syncHistoryToFirestore(updatedHistory);
+    setCargando(null);
     
     setIsDeleteProductConfirmOpen(false);
     setProductToDelete(null);
-    setDeleteProductPassword('');
 
     toast({
       title: "Producto eliminado",
@@ -3132,6 +3762,8 @@ const Index = () => {
   const limpiarFormularioPeso = () => {
     setNewWeightProduct({ 
       name: "", 
+      purchasePrice: 0,
+      salePrice: 0,
       purchasePricePerKg: 0, 
       salePricePerKg: 0, 
       equivalentGrams: 0, 
@@ -3146,6 +3778,13 @@ const Index = () => {
     setEquivalentGramsError('');
     setMinWeightInput('');
     setMinWeightError('');
+  };
+
+  const limpiarFormularioMetro = () => {
+    setNewMetroProduct({ name: "", purchasePrice: 0, salePrice: 0, initialStockCm: 0, category: "" });
+    setMetroPurchaseInput('');
+    setMetroSaleInput('');
+    setMetroStockInput('');
   };
 
   const limpiarFormularioMayorista = () => {
@@ -3167,6 +3806,7 @@ const Index = () => {
     setUnitPurchaseInput('');
     setUnitSaleInput('');
     limpiarFormularioPeso();
+    limpiarFormularioMetro();
     limpiarFormularioMayorista();
     setNewProductImage(null);
     setNewProductImagePreview('');
@@ -3194,10 +3834,12 @@ const Index = () => {
     let imageUrl: string | undefined = undefined;
     const tempId = Date.now().toString();
 
+    setCargando('Guardando producto…');
     if (newProductImage) {
       try {
         imageUrl = await uploadProductImage(newProductImage, tempId);
       } catch (error) {
+        setCargando(null);
         toast({
           title: "Error al procesar imagen",
           description: "Ocurrió un error al procesar la imagen.",
@@ -3259,11 +3901,13 @@ const Index = () => {
     setProducts(updatedProducts);
     safeSetItem('pos-products', JSON.stringify(updatedProducts));
     addPendingId(PENDING.PRODUCTS, productToAdd.id);
-    syncProductsToFirestore(updatedProducts);
     setStockHistory(updatedHistory);
     safeSetItem('pos-stock-history', JSON.stringify(updatedHistory));
     addPendingId(PENDING.HISTORY, updatedHistory[updatedHistory.length - 1].id);
-      syncHistoryToFirestore(updatedHistory);
+    // El historial se sube cuando el producto ya tiene su id real en la base:
+    // el movimiento apunta al producto por id y el temporal todavia no existe.
+    void syncProductsToFirestore(updatedProducts).then(() => syncHistoryToFirestore(updatedHistory));
+    setCargando(null);
     
     limpiarFormularioAgregarProducto();
     setIsAddProductOpen(false);
@@ -3298,11 +3942,13 @@ const Index = () => {
     }
 
     const nuevoProductoPesoId = generateId();
+    setCargando('Guardando producto…');
     let imageUrl: string | undefined = undefined;
     if (newProductImage) {
       try {
         imageUrl = await uploadProductImage(newProductImage, nuevoProductoPesoId);
       } catch (error) {
+        setCargando(null);
         toast({
           title: "Error al procesar imagen",
           description: "Ocurrió un error al procesar la imagen.",
@@ -3340,11 +3986,13 @@ const Index = () => {
     setProducts(updatedProducts);
     safeSetItem('pos-products', JSON.stringify(updatedProducts));
     addPendingId(PENDING.PRODUCTS, productToAdd.id);
-    syncProductsToFirestore(updatedProducts);
     setStockHistory(updatedHistory);
     safeSetItem('pos-stock-history', JSON.stringify(updatedHistory));
     addPendingId(PENDING.HISTORY, updatedHistory[updatedHistory.length - 1].id);
-      syncHistoryToFirestore(updatedHistory);
+    // El historial se sube cuando el producto ya tiene su id real en la base:
+    // el movimiento apunta al producto por id y el temporal todavia no existe.
+    void syncProductsToFirestore(updatedProducts).then(() => syncHistoryToFirestore(updatedHistory));
+    setCargando(null);
     limpiarFormularioAgregarProducto();
     setIsAddProductOpen(false);
     toast({
@@ -3353,8 +4001,95 @@ const Index = () => {
     });
   };
 
+  const agregarProductoMetro = async () => {
+    if (isMetroFormInvalid) {
+      toast({
+        title: "Datos incompletos",
+        description: "Completa correctamente todos los campos del producto por metro.",
+        variant: "destructive"
+      });
+      return;
+    }
+    if (newMetroProduct.purchasePrice >= newMetroProduct.salePrice) {
+      toast({ title: "Precios inválidos", description: "El precio de compra debe ser menor al precio de venta", variant: "destructive" });
+      return;
+    }
+    const duplicadoMetro = buscarProductoPorNombre(newMetroProduct.name);
+    if (duplicadoMetro) {
+      toast({
+        title: "Producto ya existe",
+        description: `Ya existe "${duplicadoMetro.name}" (${duplicadoMetro.saleLevels?.length ? 'Mayorista' : 'General'}). Edítalo en vez de crear uno nuevo.`,
+        variant: "destructive"
+      });
+      return;
+    }
+
+    const nuevoProductoMetroId = generateId();
+    setCargando('Guardando producto…');
+    let imageUrl: string | undefined = undefined;
+    if (newProductImage) {
+      try {
+        imageUrl = await uploadProductImage(newProductImage, nuevoProductoMetroId);
+      } catch (error) {
+        setCargando(null);
+        toast({
+          title: "Error al procesar imagen",
+          description: "Ocurrió un error al procesar la imagen.",
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+
+    const stockCm = Math.round(newMetroProduct.initialStockCm);
+    const productToAdd: Product = {
+      id: nuevoProductoMetroId,
+      name: newMetroProduct.name.trim(),
+      purchasePrice: newMetroProduct.purchasePrice,
+      salePrice: newMetroProduct.salePrice,
+      stock: stockCm,
+      initialStock: stockCm,
+      category: newMetroProduct.category.trim(),
+      type: 'metro',
+      imageUrl,
+    };
+    const updatedProducts = [...products, productToAdd];
+    const updatedHistory = [...stockHistory, {
+      id: generateId(),
+      productId: productToAdd.id,
+      productName: productToAdd.name,
+      type: 'initial' as const,
+      quantity: productToAdd.initialStock ?? productToAdd.stock,
+      resultingStock: productToAdd.stock,
+      date: new Date().toISOString()
+    }];
+    setProducts(updatedProducts);
+    safeSetItem('pos-products', JSON.stringify(updatedProducts));
+    addPendingId(PENDING.PRODUCTS, productToAdd.id);
+    setStockHistory(updatedHistory);
+    safeSetItem('pos-stock-history', JSON.stringify(updatedHistory));
+    addPendingId(PENDING.HISTORY, updatedHistory[updatedHistory.length - 1].id);
+    // Se espera el guardado para no decir "agregado" cuando la base lo rechazo.
+    const guardado = await syncProductsToFirestore(updatedProducts);
+    if (guardado) await syncHistoryToFirestore(updatedHistory);
+    setCargando(null);
+    limpiarFormularioAgregarProducto();
+    setIsAddProductOpen(false);
+    if (guardado) {
+      toast({
+        title: "Producto por metro agregado",
+        description: `${productToAdd.name} agregado al inventario`,
+      });
+    }
+  };
+
+  /**
+   * 'crear-usuario' (la clave de servicio vive solo en el servidor). Si la
+   * funcion no esta desplegada, cae en el aviso de siempre: copiar el correo
+   * y darlo de alta desde el panel de Supabase.
+   */
   const agregarUsuario = async () => {
-    if (!newUser.name || !newUser.email) {
+    if (!newUser.name?.trim() || !newUser.email?.trim()) {
       toast({
         title: "Datos incompletos",
         description: "Completa nombre y correo del usuario",
@@ -3363,214 +4098,706 @@ const Index = () => {
       return;
     }
 
-    if (newUser.role === 'empleado') {
-      if (!newUser.password) {
-        toast({
-          title: "Contraseña requerida",
-          description: "El empleado necesita una contraseña para iniciar sesión",
-          variant: "destructive"
-        });
-        return;
-      }
-      if (newUser.password !== confirmPassword) {
-        toast({
-          title: "Contraseñas no coinciden",
-          description: "La contraseña y la confirmación deben ser iguales",
-          variant: "destructive"
-        });
-        return;
-      }
+    const errores: Record<string, string> = {};
+    if (!newUser.name?.trim()) errores.name = 'Requerido';
+    if (!newUser.email?.trim()) errores.email = 'Requerido';
+    if (!newUser.password) {
+      errores.password = 'Define una contraseña';
+    } else if (newUser.password.length < 6) {
+      errores.password = 'Mínimo 6 caracteres';
     }
-
-    if (users.some(u => u.email === newUser.email)) {
-      toast({
-        title: "Correo existente",
-        description: "Este correo ya está registrado en el sistema",
-        variant: "destructive"
-      });
-      return;
+    if (newUser.password !== confirmPassword) {
+      errores.confirmPassword = 'No coincide';
     }
+    setFieldErrors(errores);
+    if (Object.keys(errores).length > 0) return;
 
-    // Validar campos antes de enviar
-    const errors: Record<string, string> = {};
-    if (!newUser.name?.trim()) errors.name = 'Requerido';
-    if (!newUser.email?.trim()) errors.email = 'Requerido';
-    if (newUser.role === 'empleado') {
-      if (!newUser.password) errors.password = 'Requerido';
-      if (newUser.password !== confirmPassword) errors.confirmPassword = 'No coincide';
-    }
-    setFieldErrors(errors);
-    if (Object.keys(errors).length > 0) return;
-
+    const correo = newUser.email.trim();
+    setCargando('Creando usuario…');
     try {
-      let fbUid = '';
-      let usuario: AppUser | undefined;
-
-      if (newUser.role === 'empleado') {
-        // Crear usuario sin cambiar la sesión del admin
-        fbUid = await createUserWithoutSignIn(newUser.email, newUser.password);
-
-        await createUserProfile(fbUid, {
-          email: newUser.email,
-          name: newUser.name,
-          role: 'empleado',
-          createdAt: new Date().toISOString(),
-          isActive: true,
-        });
-
-        usuario = {
-          id: fbUid,
-          password: await hashPassword(newUser.password),
-          email: newUser.email,
-          name: newUser.name,
-          role: newUser.role,
-          createdAt: new Date().toISOString(),
-          firebaseUid: fbUid,
-        };
-        const updatedUsers = [...users, usuario];
-        setUsers(updatedUsers);
-        safeSetItem('pos-users', JSON.stringify(updatedUsers));
-        addPendingId(PENDING.USERS, usuario.id);
-        syncUsersToFirestore(updatedUsers);
-      } else {
-        // Admin: crear en Firebase Auth + guardar localmente
-        fbUid = await createUserWithoutSignIn(newUser.email, newUser.password || 'admin');
-        await createUserProfile(fbUid, {
-          email: newUser.email,
-          name: newUser.name,
-          role: 'admin',
-          createdAt: new Date().toISOString(),
-          isActive: true,
-        });
-        const adminPassword = newUser.password || 'admin';
-        const adminHashedPassword = await hashPassword(adminPassword);
-        usuario = {
-          id: fbUid,
-          password: adminHashedPassword,
-          email: newUser.email,
-          name: newUser.name,
-          role: 'admin',
-          createdAt: new Date().toISOString(),
-          firebaseUid: fbUid,
-        };
-        const updatedUsers = [...users, usuario];
-        setUsers(updatedUsers);
-        safeSetItem('pos-users', JSON.stringify(updatedUsers));
-        addPendingId(PENDING.USERS, usuario.id);
-        syncUsersToFirestore(updatedUsers);
-      }
-
+      await crearUsuarioPorAdmin({
+        email: correo,
+        password: newUser.password,
+        nombre: newUser.name.trim(),
+        rol: newUser.role,
+      });
+      const actualizados = await getAllLocalUsers().catch(() => null as any);
+      if (actualizados) setUsers(actualizados);
+      setIsAddUserOpen(false);
       setNewUser({ password: '', name: '', role: 'empleado', email: '' });
       setConfirmPassword('');
-      setShowPassword(false);
-      setShowConfirmPassword(false);
       setFieldErrors({});
-      setIsAddUserOpen(false);
-      
       toast({
-        title: "Usuario agregado",
-        description: `${newUser.role === 'admin' ? 'Administrador' : 'Usuario'} ${usuario?.name} creado exitosamente`,
+        title: "Usuario creado",
+        description: `La cuenta ${correo} ya puede iniciar sesión con la contraseña indicada.`,
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Error al crear usuario";
-      toast({ title: "Error", description: msg, variant: "destructive" });
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      const inalcanzable = /failed to send|failed to fetch|not found|network|404/i.test(msg);
+      try {
+        if (inalcanzable) await navigator.clipboard.writeText(correo);
+      } catch { /* el portapapeles puede estar bloqueado */ }
+      setIsAddUserOpen(false);
+      setNewUser({ password: '', name: '', role: 'empleado', email: '' });
+      setConfirmPassword('');
+      setFieldErrors({});
+      toast({
+        title: inalcanzable ? "No se pudo contactar la función" : "No se pudo crear el usuario",
+        description: inalcanzable
+          ? `${msg} Crea la cuenta "${correo}" en Supabase > Authentication > Users > Add user (correo copiado). El rol lo verás aquí al recargar.`
+          : msg,
+        variant: "destructive",
+        duration: 12000,
+      });
+    } finally {
+      setCargando(null);
     }
   };
 
   const editarUsuario = (user: AppUser) => {
     setEditingUser({ ...user, password: '' });
+    setEditUserPassword('');
     setIsEditUserOpen(true);
+  };
+
+  const definirPasswordUsuario = async () => {
+    if (!editingUser) return;
+    if (editUserPassword.length < 6) {
+      toast({ title: 'Contraseña muy corta', description: 'Usa al menos 6 caracteres.', variant: 'destructive' });
+      return;
+    }
+    setIsChangingUserPassword(true);
+    setCargando('Cambiando contraseña…');
+    try {
+      await adminCambiarPassword(editingUser.id, editUserPassword);
+      setEditUserPassword('');
+      toast({
+        title: 'Contraseña actualizada',
+        description: `${editingUser.name} ya puede entrar con la nueva contraseña.`,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      toast({ title: 'No se pudo cambiar la contraseña', description: msg, variant: 'destructive' });
+    } finally {
+      setIsChangingUserPassword(false);
+      setCargando(null);
+    }
   };
 
   const guardarEdicionUsuario = async () => {
     if (!editingUser) return;
 
-    let userToSave = { ...editingUser };
+    const usuarioActual = getCurrentSupabaseUser();
+    const miEmail = usuarioActual?.email ?? null;
 
-    // Recuperar el usuario original para saber si la contraseña cambió realmente
-    const originalUser = users.find(u => u.id === editingUser.id);
-    const originalPassword = originalUser?.password || '';
-
-    // Solo hashear si la contraseña realmente cambió (el hash original es diferente)
-    const passwordChanged = userToSave.password && userToSave.password !== originalPassword;
-    if (passwordChanged) {
-      userToSave.password = await hashPassword(userToSave.password);
-    } else {
-      userToSave.password = originalPassword; // restaurar hash original
+    // No permitir que un admin se degrade a si mismo ni elimine el propio estado.
+    if (editingUser.email === miEmail && editingUser.role !== 'admin') {
+      toast({
+        title: "No puedes quitar tu propio rol",
+        description: "Un administrador no puede degradarse a sí mismo.",
+        variant: "destructive",
+      });
+      return;
     }
 
-    // Actualizar perfil en Firestore si tiene firebaseUid
-    if (editingUser.firebaseUid) {
-      try {
-        await updateUserProfile(editingUser.firebaseUid, {
-          name: editingUser.name,
-          role: editingUser.role,
-        });
-      } catch (err: unknown) {
-        console.error('Error al actualizar perfil en Firestore:', err);
-      }
-
-      // Actualizar contraseña en Firebase Authentication solo si cambió
-      if (passwordChanged) {
-        try {
-          const apiKey = auth.app.options.apiKey;
-          await fetch(
-            `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${apiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                localId: editingUser.firebaseUid,
-                password: editingUser.password,
-                returnSecureToken: false
-              })
-            }
-          );
-        } catch (err: unknown) {
-          console.error('Error al actualizar contraseña en Firebase Auth:', err);
-        }
-      }
+    // Nombre y rol se guardan en la base. La contraseña la administra Supabase
+    // (correo de recuperacion o panel), nunca la app.
+    try {
+      await updateUserProfile(editingUser.firebaseUid ?? editingUser.id, {
+        displayName: editingUser.name,
+        role: editingUser.role,
+      });
+    } catch (err: unknown) {
+      console.error('Error al actualizar perfil:', err);
+      toast({
+        title: "No se pudo guardar",
+        description: err instanceof Error ? err.message : "Error desconocido",
+        variant: "destructive",
+      });
+      return;
     }
 
-    const updatedUsers = users.map(u => 
-      u.id === editingUser.id ? userToSave : u
-    );
-    
-    setUsers(updatedUsers);
-    safeSetItem('pos-users', JSON.stringify(updatedUsers));
-    addPendingId(PENDING.USERS, editingUser.id);
-      syncUsersToFirestore(updatedUsers);
+    const actualizados = await getAllLocalUsers().catch(() => null as any);
+    if (actualizados) setUsers(actualizados);
     setIsEditUserOpen(false);
     setEditingUser(null);
-    
+
     toast({
       title: "Usuario actualizado",
-      description: "Los cambios se guardaron correctamente",
+      description: "El nombre y el rol se guardaron. La contraseña se cambia en Supabase o con el correo de recuperación.",
     });
   };
 
   const eliminarUsuario = async (userId: string) => {
+    // Defensa doble: los administradores jamas se bloquean desde la app.
+    const blanco = users.find(u => u.id === userId) ?? usuarioAEliminar;
+    if (blanco?.role === 'admin') {
+      toast({
+        title: "Operación no permitida",
+        description: "Los administradores no se pueden eliminar desde la app. Hazlo desde el panel de Supabase si es necesario.",
+        variant: "destructive",
+      });
+      return;
+    }
     try { await deleteLocalUser(userId); } catch (e) { console.error('ERROR deleteLocalUser:', e); }
     removePendingId(PENDING.USERS, userId);
-    // Eliminar perfil de Firestore si tiene firebaseUid
-    const user = users.find(u => u.id === userId);
+    const user = users.find(u => u.id === userId) ?? usuarioAEliminar;
     if (user?.firebaseUid) {
       try {
         await deleteUserProfile(user.firebaseUid);
       } catch (err: unknown) {
-        console.error('Error al eliminar perfil de Firestore:', err);
+        console.error('Error al eliminar perfil:', err);
       }
     }
 
-    const updatedUsers = users.filter(u => u.id !== userId);
-    setUsers(updatedUsers);
-    safeSetItem('pos-users', JSON.stringify(updatedUsers));
-      syncUsersToFirestore(updatedUsers);
-    
+    const actualizados = await getAllLocalUsers().catch(() => null as any);
+    if (actualizados) setUsers(actualizados);
+    setUsuarioAEliminar(null);
+
     toast({
-      title: "Usuario eliminado",
-      description: "El usuario se eliminó correctamente",
+      title: "Usuario bloqueado",
+      description: `${user?.name ?? 'El empleado'} ya no puede entrar. Para quitarle el acceso por completo, bórralo también en Supabase > Authentication > Users.`,
+      duration: 8000,
     });
+  };
+
+  // ===================== PESTAÑA CLIENTES =====================
+  interface Serie { id: string; serie: string; tipo_documento: string; descripcion: string; activa: boolean; }
+  const [clients, setClients] = useState<Cliente[]>([]);
+  const [isAddClientOpen, setIsAddClientOpen] = useState(false);
+  const [clientToEdit, setClientToEdit] = useState<Cliente | null>(null);
+  const [clientToDelete, setClientToDelete] = useState<Cliente | null>(null);
+  const [clientErrors, setClientErrors] = useState<Record<string, string>>({});
+  const [isConsultingRuc, setIsConsultingRuc] = useState(false);
+  const [clientForm, setClientForm] = useState({
+    tipoDocumento: '6',
+    numeroDocumento: '',
+    razonSocial: '',
+    direccion: '',
+    telefono: '',
+    email: '',
+  });
+
+  // ===================== PESTAÑA EMITIR COMPROBANTE =====================
+  const [comprobantes, setComprobantes] = useState<Comprobante[]>([]);
+  const [series, setSeries] = useState<Serie[]>([]);
+  const [emisor, setEmisor] = useState<Emisor | null>(null);
+  const [isSavingEmisor, setIsSavingEmisor] = useState(false);
+  const [emisorForm, setEmisorForm] = useState({
+    ruc: '', razonSocial: '', nombreComercial: '', direccion: '',
+    telefono: '', email: '', igvRate: '18', redondeoEfectivo: true,
+  });
+  const [isEmitOpen, setIsEmitOpen] = useState(false);
+  const [isEmitting, setIsEmitting] = useState(false);
+  const [emitForm, setEmitForm] = useState({ ventaId: '', tipoDocumento: '03', serie: '', clienteId: '' });
+  const [comprobanteAnular, setComprobanteAnular] = useState<Comprobante | null>(null);
+  const [comprobantePreviewHTML, setComprobantePreviewHTML] = useState('');
+  const [comprobantePreviewNumero, setComprobantePreviewNumero] = useState('');
+  const [isComprobantePreviewOpen, setIsComprobantePreviewOpen] = useState(false);
+  const [emitRucInput, setEmitRucInput] = useState('');
+  const [isConsultandoRucEmit, setIsConsultandoRucEmit] = useState(false);
+  const [emitClienteNoRegistrado, setEmitClienteNoRegistrado] = useState<{ razonSocial: string; direccion?: string } | null>(null);
+  const [isConfirmarClienteOpen, setIsConfirmarClienteOpen] = useState(false);
+  const [clienteVer, setClienteVer] = useState<Cliente | null>(null);
+  const [creandoCliente, setCreandoCliente] = useState(false);
+  const [clientesBusca, setClientesBusca] = useState('');
+  const [comprobanteBusca, setComprobanteBusca] = useState('');
+  const [comprobanteFiltro, setComprobanteFiltro] = useState<'all' | '01' | '03'>('all');
+  const [emitirSoloHoy, setEmitirSoloHoy] = useState(true);
+
+  const tipoDocClienteLabel = (t: string) => t === '6' ? 'RUC' : t === '1' ? 'DNI' : 'Doc';
+  const tipoComprobanteLabel = (t: string) => t === '01' ? 'Factura' : t === '03' ? 'Boleta' : t;
+
+  const buscarCliente = (q: string) => {
+    const term = q.trim().toLowerCase();
+    if (!term) return clients;
+    return clients.filter(c => `${c.numeroDocumento} ${c.razonSocial}`.toLowerCase().includes(term));
+  };
+  const clientesFiltradosTab = buscarCliente(clientesBusca);
+  const comprobanteVentaIds = new Set(comprobantes.map(c => c.venta_id).filter(Boolean));
+  const hoyStr = getLocalDateStr(new Date());
+  const ventasPendientesBase = sales.filter(v => !comprobanteVentaIds.has(v.id));
+  const ventasPendientes = emitirSoloHoy
+    ? ventasPendientesBase.filter(v => (v.localDate || getLocalDateStr(new Date(v.date))) === hoyStr)
+    : ventasPendientesBase;
+  const ventasPendientesCount = ventasPendientes.length;
+  // Numero de ticket corto y amigable (orden cronologico de todas las ventas).
+  const ticketNumberById = new Map<string, number>();
+  [...sales]
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+    .forEach((s, i) => ticketNumberById.set(s.id, i + 1));
+  const ticketNumberOf = (id: string) => ticketNumberById.get(id) ?? 0;
+
+  const ventaOptions: ComboOption[] = ventasPendientes.slice(0, 100).map(s => {
+    const d = new Date(s.date);
+    const nro = ticketNumberOf(s.id);
+    return {
+      value: s.id,
+      label: `#${nro} · ${d.toLocaleDateString('es-ES')} ${d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })} · S/ ${s.total.toFixed(2)}`,
+      search: `#${nro} ${s.id} ${s.total.toFixed(2)}`,
+      node: (
+        <span className="flex flex-1 items-center gap-2 text-xs">
+          <span className="w-12 font-semibold text-slate-700">#{nro}</span>
+          <span className="text-slate-500">{d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' })}</span>
+          <span className="text-slate-500">{d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</span>
+          <span className="ml-auto font-semibold text-slate-900">S/ {s.total.toFixed(2)}</span>
+        </span>
+      ),
+    };
+  });
+  const clienteOptions: ComboOption[] = [
+    { value: 'none', label: 'Sin cliente (Boleta a varios)', search: 'sin cliente varios' },
+    ...clients.map(c => ({
+      value: c.id,
+      label: `${c.numeroDocumento} · ${c.razonSocial}`,
+      search: `${c.numeroDocumento} ${c.razonSocial}`,
+    })),
+  ];
+  const comprobantesFiltrados = comprobantes.filter(c => {
+    if (comprobanteFiltro !== 'all' && c.tipo_documento !== comprobanteFiltro) return false;
+    const q = comprobanteBusca.trim().toLowerCase();
+    if (!q) return true;
+    const cliente = clients.find(cl => cl.id === c.cliente_id);
+    const fecha = new Date(c.fecha_emision).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }).toLowerCase();
+    return `${c.numero} ${tipoComprobanteLabel(c.tipo_documento)} ${cliente?.razonSocial ?? ''} ${c.estado} ${fecha} ${c.total_venta.toFixed(2)}`.toLowerCase().includes(q);
+  });
+
+  // Cargar clientes, comprobantes, series y emisor (solo admin, en tiempo real)
+  useEffect(() => {
+    if (!isAuthenticated || userRole !== 'admin') return;
+    const unsubClients = subscribeClients(setClients);
+    const unsubComprobantes = subscribeComprobantes(setComprobantes);
+    const cargarBase = async () => {
+      try {
+        const { data } = await supabase
+          .from('series')
+          .select('id, serie, tipo_documento, descripcion, activa')
+          .eq('activa', true)
+          .order('serie');
+        if (data) setSeries(data as unknown as Serie[]);
+        const e = await getEmisor().catch(() => null);
+        setEmisor(e ?? null);
+        if (e?.logoUrl) {
+          setCompanyLogo(e.logoUrl);
+          safeSetItem('pos-company-logo', e.logoUrl);
+        }
+      } catch (err) {
+        console.error('[emitir] carga inicial', err);
+      }
+    };
+    void cargarBase();
+    return () => { unsubClients(); unsubComprobantes(); };
+  }, [isAuthenticated, userRole]);
+
+  const abrirNuevoCliente = () => {
+    setClientToEdit(null);
+    setClientErrors({});
+    setClientForm({ tipoDocumento: '6', numeroDocumento: '', razonSocial: '', direccion: '', telefono: '', email: '' });
+    setIsAddClientOpen(true);
+  };
+
+  const abrirEditarCliente = (c: Cliente) => {
+    setClientToEdit(c);
+    setClientErrors({});
+    setClientForm({
+      tipoDocumento: c.tipoDocumento || '6',
+      numeroDocumento: c.numeroDocumento,
+      razonSocial: c.razonSocial,
+      direccion: c.direccion ?? '',
+      telefono: c.telefono ?? '',
+      email: c.email ?? '',
+    });
+    setIsAddClientOpen(true);
+  };
+
+  const consultarRucCliente = async () => {
+    const ruc = clientForm.numeroDocumento.replace(/\D/g, '');
+    if (ruc.length !== 11) {
+      toast({ title: 'RUC inválido', description: 'El RUC debe tener 11 dígitos.', variant: 'destructive' });
+      return;
+    }
+    setIsConsultingRuc(true);
+    try {
+      const data = await consultarRuc(ruc);
+      setClientForm(prev => ({
+        ...prev,
+        tipoDocumento: '6',
+        razonSocial: data.razonSocial || prev.razonSocial,
+        direccion: data.direccion || prev.direccion,
+      }));
+      const esActivo = (data.estado ?? '').trim().toUpperCase() === 'ACTIVO';
+      const esHabil = (data.condicion ?? '').trim().toUpperCase() === 'HABIDO';
+      if (data.estado && !esActivo) {
+        toast({ title: `Atención: RUC ${data.estado}`, description: (data.condicion ? `Condición: ${data.condicion}. ` : '') + (data.razonSocial || ''), variant: 'destructive' });
+      } else if (data.condicion && !esHabil) {
+        toast({ title: `Atención: condición ${data.condicion}`, description: data.razonSocial || 'Revisa el estado del contribuyente.', variant: 'destructive' });
+      } else {
+        toast({ title: 'RUC consultado', description: data.razonSocial || 'Datos encontrados.' });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'No se pudo consultar';
+      toast({ title: 'No se pudo consultar el RUC', description: msg, variant: 'destructive' });
+    } finally {
+      setIsConsultingRuc(false);
+    }
+  };
+
+  const guardarCliente = async () => {
+    const errores: Record<string, string> = {};
+    if (!clientForm.numeroDocumento.trim()) errores.numeroDocumento = 'Requerido';
+    if (!clientForm.razonSocial.trim()) errores.razonSocial = 'Requerido';
+    setClientErrors(errores);
+    if (Object.keys(errores).length > 0) return;
+    try {
+      const payload = {
+        tipoDocumento: clientForm.tipoDocumento,
+        numeroDocumento: clientForm.numeroDocumento.trim(),
+        razonSocial: clientForm.razonSocial.trim(),
+        direccion: clientForm.direccion.trim() || undefined,
+        telefono: clientForm.telefono.trim() || undefined,
+        email: clientForm.email.trim() || undefined,
+      };
+      if (clientToEdit) {
+        await updateClient(clientToEdit.id, payload);
+        toast({ title: 'Cliente actualizado', description: payload.razonSocial });
+      } else {
+        const docNorm = payload.numeroDocumento.replace(/\D/g, '');
+        const yaExiste = clients.find(c => c.numeroDocumento.replace(/\D/g, '') === docNorm && (c.tipoDocumento || '0') === (payload.tipoDocumento || '0'));
+        if (yaExiste) {
+          toast({ title: 'Cliente ya registrado', description: `Ya existe "${yaExiste.razonSocial}" con ese documento.`, variant: 'destructive' });
+          return;
+        }
+        await createClient(payload);
+        toast({ title: 'Cliente creado', description: payload.razonSocial });
+      }
+      setIsAddClientOpen(false);
+      setClientToEdit(null);
+      const actualizados = await getAllClients().catch(() => null);
+      if (actualizados) setClients(actualizados);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      const esDuplicado = /duplicate key|23505|unique constraint/i.test(msg);
+      toast({
+        title: esDuplicado ? 'Cliente ya registrado' : 'No se pudo guardar el cliente',
+        description: esDuplicado ? 'Ya existe un cliente con ese tipo y número de documento.' : msg,
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const eliminarCliente = async () => {
+    if (!clientToDelete) return;
+    try {
+      await deleteClient(clientToDelete.id);
+      const actualizados = await getAllClients().catch(() => null);
+      if (actualizados) setClients(actualizados);
+      toast({ title: 'Cliente eliminado', description: clientToDelete.razonSocial });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      toast({ title: 'No se pudo eliminar', description: msg, variant: 'destructive' });
+    } finally {
+      setClientToDelete(null);
+    }
+  };
+
+  const abrirConfigEmisor = () => {
+    setEmisorForm({
+      ruc: emisor?.ruc ?? '',
+      razonSocial: emisor?.razonSocial ?? '',
+      nombreComercial: emisor?.nombreComercial ?? '',
+      direccion: emisor?.direccion ?? '',
+      telefono: emisor?.telefono ?? '',
+      email: emisor?.email ?? '',
+      igvRate: String(emisor?.igvRate ?? 18),
+      redondeoEfectivo: emisor?.redondeoEfectivo ?? true,
+    });
+    setIsConfigOpen(true);
+  };
+
+  const guardarEmisor = async () => {
+    if (!emisorForm.ruc.trim() || !emisorForm.razonSocial.trim()) {
+      toast({ title: 'Datos incompletos', description: 'El RUC y la razón social son obligatorios.', variant: 'destructive' });
+      return;
+    }
+    setIsSavingEmisor(true);
+    try {
+      const guardado = await saveEmisor({
+        ruc: emisorForm.ruc,
+        razonSocial: emisorForm.razonSocial,
+        nombreComercial: emisorForm.nombreComercial || undefined,
+        direccion: emisorForm.direccion || undefined,
+        telefono: emisorForm.telefono || undefined,
+        email: emisorForm.email || undefined,
+        igvRate: Number(emisorForm.igvRate) || 18,
+        redondeoEfectivo: emisorForm.redondeoEfectivo,
+        logoUrl: companyLogo || undefined,
+      });
+      setEmisor(guardado);
+      toast({ title: 'Datos de la empresa guardados', description: guardado.razonSocial });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      toast({ title: 'No se pudo guardar la empresa', description: msg, variant: 'destructive' });
+    } finally {
+      setIsSavingEmisor(false);
+    }
+  };
+
+  const abrirEmitir = () => {
+    if (!emisor) {
+      toast({ title: 'Configura la Empresa primero', description: 'Registra el RUC y la razón social antes de emitir.', variant: 'destructive' });
+      abrirConfigEmisor();
+      return;
+    }
+    const primeraSerie = series.find(s => s.tipo_documento === '03') ?? series[0];
+    setEmitForm({
+      ventaId: '', clienteId: '',
+      tipoDocumento: primeraSerie?.tipo_documento ?? '03',
+      serie: primeraSerie?.serie ?? '',
+    });
+    setEmitRucInput('');
+    setEmitClienteNoRegistrado(null);
+    setIsEmitOpen(true);
+  };
+
+  const abrirEmitirDesdeVenta = (sale: Sale, tipoDocumento: '01' | '03') => {
+    if (!emisor) {
+      toast({ title: 'Configura la Empresa primero', description: 'Registra el RUC y la razón social antes de emitir.', variant: 'destructive' });
+      abrirConfigEmisor();
+      return;
+    }
+    const serie = series.find(s => s.tipo_documento === tipoDocumento);
+    if (!serie) {
+      toast({
+        title: 'Serie no disponible',
+        description: `No hay una serie activa para ${tipoDocumento === '01' ? 'Factura' : 'Boleta'}.`,
+        variant: 'destructive',
+      });
+      return;
+    }
+    const clienteVenta = sale.clientId ? clients.find(c => c.id === sale.clientId) : null;
+    setEmitForm({ ventaId: sale.id, tipoDocumento, serie: serie.serie, clienteId: clienteVenta?.id ?? '' });
+    setEmitRucInput(clienteVenta?.numeroDocumento ?? '');
+    setEmitClienteNoRegistrado(null);
+    setIsEmitOpen(true);
+  };
+
+  const consultarRucEnEmitir = async () => {
+    const ruc = emitRucInput.replace(/\D/g, '');
+    if (ruc.length !== 11) {
+      toast({ title: 'RUC inválido', description: 'El RUC debe tener 11 dígitos.', variant: 'destructive' });
+      return;
+    }
+    const existente = clients.find(c => c.numeroDocumento.replace(/\D/g, '') === ruc);
+    if (existente) {
+      setEmitForm(prev => ({ ...prev, clienteId: existente.id }));
+      setEmitClienteNoRegistrado(null);
+      toast({ title: 'Cliente encontrado', description: existente.razonSocial });
+      return;
+    }
+    setIsConsultandoRucEmit(true);
+    try {
+      const data = await consultarRuc(ruc);
+      setEmitClienteNoRegistrado({ razonSocial: data.razonSocial, direccion: data.direccion });
+      setEmitForm(prev => ({ ...prev, clienteId: '' }));
+      toast({ title: 'RUC no registrado', description: 'Pulsa "Registrar cliente" para usarlo.' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'No se pudo consultar';
+      toast({ title: 'No se pudo consultar el RUC', description: msg, variant: 'destructive' });
+    } finally {
+      setIsConsultandoRucEmit(false);
+    }
+  };
+
+  // Crea el cliente desde Emitir o, si ya existe ese documento, devuelve el id
+  // del existente. Asi nunca choca con la restriccion unica (tipo, numero).
+  const crearOSeleccionarCliente = async (datos: { numeroDocumento: string; razonSocial: string; direccion?: string }): Promise<string> => {
+    const doc = datos.numeroDocumento.replace(/\D/g, '');
+    const fresco = (await getAllClients().catch(() => null)) ?? clients;
+    const existe = fresco.find(c => c.numeroDocumento.replace(/\D/g, '') === doc);
+    if (existe) {
+      setClients(fresco);
+      return existe.id;
+    }
+    const creado = await createClient({
+      tipoDocumento: '6',
+      numeroDocumento: doc,
+      razonSocial: datos.razonSocial,
+      direccion: datos.direccion,
+    });
+    const actualizados = await getAllClients().catch(() => null);
+    if (actualizados) setClients(actualizados);
+    return creado.id;
+  };
+
+  const registrarClienteDesdeEmitir = async () => {
+    if (!emitClienteNoRegistrado || creandoCliente) return;
+    setCreandoCliente(true);
+    try {
+      const ruc = emitRucInput.replace(/\D/g, '');
+      const id = await crearOSeleccionarCliente({
+        numeroDocumento: ruc,
+        razonSocial: emitClienteNoRegistrado.razonSocial,
+        direccion: emitClienteNoRegistrado.direccion,
+      });
+      setEmitForm(prev => ({ ...prev, clienteId: id }));
+      setEmitClienteNoRegistrado(null);
+      toast({ title: 'Cliente listo', description: emitClienteNoRegistrado.razonSocial });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      toast({ title: 'No se pudo registrar el cliente', description: msg, variant: 'destructive' });
+    } finally {
+      setCreandoCliente(false);
+    }
+  };
+
+  const emitirComprobanteActual = async () => {
+    if (!emitForm.ventaId) {
+      toast({ title: 'Selecciona una venta', variant: 'destructive' });
+      return;
+    }
+    if (!emitForm.serie) {
+      toast({ title: 'Selecciona una serie', variant: 'destructive' });
+      return;
+    }
+    // Factura sin cliente seleccionado pero con RUC consultado: preguntar antes de guardarlo.
+    if (emitForm.tipoDocumento === '01' && !emitForm.clienteId && emitClienteNoRegistrado) {
+      setIsConfirmarClienteOpen(true);
+      return;
+    }
+    await ejecutarEmision();
+  };
+
+  const ejecutarEmision = async (clienteIdOverride?: string) => {
+    const clienteId = clienteIdOverride ?? emitForm.clienteId;
+    if (emitForm.tipoDocumento === '01' && !clienteId) {
+      toast({ title: 'Falta el cliente', description: 'La factura requiere RUC y razón social del cliente.', variant: 'destructive' });
+      return;
+    }
+    const venta = sales.find(s => s.id === emitForm.ventaId);
+    if (!venta) {
+      toast({ title: 'Venta no encontrada', description: 'Recarga la página y vuelve a intentarlo.', variant: 'destructive' });
+      return;
+    }
+    // Las ventas creadas sin conexión tienen un id temporal (Date.now()) y no
+    // existen en la base: emitirlas revienta con "out of range for type integer".
+    if (!/^\d{1,10}$/.test(venta.id) || isPendingId(PENDING.SALES, venta.id)) {
+      toast({
+        title: 'Venta sin guardar en Supabase',
+        description: 'Esta venta aún no se sincronizó. Recarga la página para que se suba y luego emite el comprobante.',
+        variant: 'destructive',
+        duration: 10000,
+      });
+      return;
+    }
+    const totalVenta = venta.total ?? 0;
+    setIsEmitting(true);
+    setCargando('Emitiendo comprobante…');
+    try {
+      const comp = await emitirComprobante({
+        ventaId: emitForm.ventaId,
+        serie: emitForm.serie,
+        clienteId: clienteId || null,
+        tipoDocumento: emitForm.tipoDocumento === '01' ? '01' : '03',
+        totalVenta,
+        igvRate: emisor?.igvRate ?? 18,
+      });
+      const cliente = clients.find(c => c.id === clienteId) ?? null;
+      const resultado = await emitirSunat(comp, emisor, cliente);
+      try { await updateComprobanteSunat(comp.id, resultado); } catch { /* estado local */ }
+      setComprobantes(prev => [comp, ...prev]);
+      setIsEmitOpen(false);
+      if (venta) {
+        const html = await generarComprobanteElectronicoHTML({
+          tipoDocumento: emitForm.tipoDocumento === '01' ? '01' : '03',
+          numero: comp.numero,
+          fecha: comp.fecha_emision,
+          emisor,
+          cliente,
+          venta,
+          igvRate: emisor?.igvRate ?? 18,
+        });
+        setComprobantePreviewHTML(html);
+        setComprobantePreviewNumero(comp.numero);
+        setIsComprobantePreviewOpen(true);
+      }
+      toast({ title: 'Comprobante emitido', description: comp.numero + (resultado.estado === 'emitido_local' ? ' (local)' : '') });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      toast({ title: 'No se pudo emitir', description: msg, variant: 'destructive' });
+    } finally {
+      setIsEmitting(false);
+      setCargando(null);
+    }
+  };
+
+  const confirmarRegistrarClienteYEmitir = async () => {
+    if (!emitClienteNoRegistrado || creandoCliente) return;
+    setIsEmitting(true);
+    try {
+      const ruc = emitRucInput.replace(/\D/g, '');
+      const id = await crearOSeleccionarCliente({
+        numeroDocumento: ruc,
+        razonSocial: emitClienteNoRegistrado.razonSocial,
+        direccion: emitClienteNoRegistrado.direccion,
+      });
+      setEmitForm(prev => ({ ...prev, clienteId: id }));
+      setEmitClienteNoRegistrado(null);
+      setIsConfirmarClienteOpen(false);
+      await ejecutarEmision(id);
+    } catch (err) {
+      setIsEmitting(false);
+      setIsConfirmarClienteOpen(false);
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      toast({ title: 'No se pudo registrar el cliente', description: msg, variant: 'destructive' });
+    }
+  };
+
+  const verComprobanteOriginal = async (c: Comprobante) => {
+    if (!emisor) {
+      toast({ title: 'Configura la Empresa primero', description: 'Registra el RUC y la razón social antes de ver comprobantes.', variant: 'destructive' });
+      return;
+    }
+    const venta = sales.find(s => s.id === c.venta_id);
+    if (!venta) {
+      toast({ title: 'No se encontró la venta', description: 'La venta original fue eliminada o ya no existe.', variant: 'destructive' });
+      return;
+    }
+    const cliente = clients.find(cl => cl.id === c.cliente_id) ?? null;
+    try {
+      const xmlUrl = (c as any).url_xml || (c as any).xmlUrl || (c as any).sunat_xml_url || undefined;
+      const pdfUrl = (c as any).url_pdf || (c as any).pdfUrl || undefined;
+      const html = await generarComprobanteElectronicoHTML({
+        tipoDocumento: c.tipo_documento === '01' ? '01' : '03',
+        numero: c.numero,
+        fecha: c.fecha_emision,
+        emisor,
+        cliente,
+        venta,
+        igvRate: emisor?.igvRate ?? 18,
+        xmlUrl,
+        pdfUrl,
+      });
+      setComprobantePreviewHTML(html);
+      setComprobantePreviewNumero(c.numero);
+      setIsComprobantePreviewOpen(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      toast({ title: 'No se pudo generar el comprobante', description: msg, variant: 'destructive' });
+    }
+  };
+
+  const anularComprobanteActual = async () => {
+    if (!comprobanteAnular) return;
+    try {
+      await anularComprobante(comprobanteAnular.id);
+      setComprobantes(prev => prev.map(c => c.id === comprobanteAnular.id ? { ...c, estado: 'anulado' } : c));
+      toast({ title: 'Comprobante anulado', description: comprobanteAnular.numero });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error desconocido';
+      toast({ title: 'No se pudo anular', description: msg, variant: 'destructive' });
+    } finally {
+      setComprobanteAnular(null);
+    }
   };
 
   const cerrarCaja = () => {
@@ -3592,7 +4819,7 @@ const Index = () => {
     const totalProfit = todaySales.reduce((sum, sale) => sum + (sale.totalProfit || 0), 0);
     const totalItems = todaySales.reduce((sum, sale) => 
       sum + (sale.items || []).reduce((itemSum, item) => {
-        return item?.product?.type === 'peso' ? itemSum + 1 : itemSum + (item?.quantity || 0);
+        return (item?.product?.type === 'peso' || item?.product?.type === 'metro') ? itemSum + 1 : itemSum + (item?.quantity || 0);
       }, 0), 0
     );
 
@@ -3603,7 +4830,7 @@ const Index = () => {
       plin: todaySales.filter(s => s.paymentMethod === 'plin').reduce((sum, s) => sum + (s.total || 0), 0)
     };
 
-    const currentUserName = firebaseUser?.name || users.find(u => u.email === auth.currentUser?.email)?.name || userRole;
+    const currentUserName = firebaseUser?.displayName || users.find(u => u.email === getCurrentSupabaseUser()?.email)?.name || userRole;
 
     const existingCloseIndex = dailyCloses.findIndex(c => c.date === today);
     let updatedCloses: DailyClose[];
@@ -3657,13 +4884,8 @@ const Index = () => {
   };
 
   const confirmClearTodaySales = async () => {
-    if (!clearSalesPassword) {
-      toast({ title: "Error", description: "Por favor ingresa la contraseña de administrador", variant: "destructive" });
-      return;
-    }
-    const isValid = await isValidAdminPassword(clearSalesPassword, users);
-    if (!isValid) {
-      toast({ title: "Contraseña incorrecta", description: "La contraseña de administrador no es válida", variant: "destructive" });
+    if (!(await esAdminActual())) {
+      toast({ title: "Sin permiso", description: "Solo un administrador puede limpiar las ventas del dia", variant: "destructive" });
       return;
     }
     const today = getLocalDateStr(new Date());
@@ -3685,7 +4907,6 @@ const Index = () => {
     syncSalesToFirestore(updatedSales);
     toast({ title: "Ventas eliminadas", description: `Se eliminaron ${todaySalesIds.length} ventas del día.` });
     setIsClearSalesOpen(false);
-    setClearSalesPassword('');
   };
 
   const viewCloseDetail = (dailyClose: DailyClose) => {
@@ -3749,10 +4970,14 @@ const Index = () => {
         sale.items.forEach(item => {
           const quantity = item.product?.type === 'peso' 
             ? formatWeight(item.quantity)
-            : item.quantity;
+            : item.product?.type === 'metro'
+              ? formatLength(item.quantity)
+              : item.quantity;
           const price = item.product?.type === 'peso'
             ? `S/ ${((item.product.salePricePerKg || 0) * (item.quantity / 1000)).toFixed(2)}`
-            : `S/ ${((item.product?.salePrice || 0) * item.quantity).toFixed(2)}`;
+            : item.product?.type === 'metro'
+              ? `S/ ${((item.product?.salePrice || 0) * (item.quantity / 100)).toFixed(2)}`
+              : `S/ ${((item.product?.salePrice || 0) * item.quantity).toFixed(2)}`;
           
           textContent += `${item.product?.name || 'Producto sin nombre'}\n`;
           textContent += `  Cantidad: ${quantity} - ${price}\n`;
@@ -3797,33 +5022,28 @@ const Index = () => {
     setAdminPassword('');
   };
 
-  const confirmDeleteDailyClose = async () => {
-    if (!closeToDelete || !adminPassword) {
+    const confirmDeleteDailyClose = async () => {
+    if (!closeToDelete) return;
+
+    if (!(await esAdminActual())) {
       toast({
-        title: "Error",
-        description: "Por favor ingresa la contraseña de administrador",
+        title: "Sin permiso",
+        description: "Solo un administrador puede eliminar cierres de caja",
         variant: "destructive"
       });
       return;
     }
 
-    const isPasswordValid = await isValidAdminPassword(adminPassword, users);
-    if (!isPasswordValid) {
-      toast({
-        title: "Contraseña incorrecta",
-        description: "La contraseña de administrador no es válida",
-        variant: "destructive"
-      });
-      return;
-    }
 
     // Eliminar el cierre de caja
+    setCargando('Eliminando cierre…');
     try { await deleteDailyClose(closeToDelete.id); } catch (e) { console.error('ERROR deleteDailyClose:', e); }
     removePendingId(PENDING.CLOSES, closeToDelete.id);
     const updatedCloses = dailyCloses.filter(c => c.id !== closeToDelete.id);
     setDailyCloses(updatedCloses);
     safeSetItem('pos-daily-closes', JSON.stringify(updatedCloses));
     syncClosesToFirestore(updatedCloses);
+    setCargando(null);
     
     setIsDeleteCloseOpen(false);
     setCloseToDelete(null);
@@ -3850,6 +5070,7 @@ const Index = () => {
     if (inventoryView === 'todos') return matchesSearch;
     if (inventoryView === 'unidad') return matchesSearch && product.type === 'unidad';
     if (inventoryView === 'peso') return matchesSearch && product.type === 'peso';
+    if (inventoryView === 'metro') return matchesSearch && product.type === 'metro';
     
     return matchesSearch;
   });
@@ -3884,6 +5105,8 @@ const Index = () => {
     if (product.type === 'peso') {
       const purchasePrice = product.purchasePrice ?? product.purchasePricePerKg ?? 0;
       return purchasePrice * (product.stock / 1000);
+    } else if (product.type === 'metro') {
+      return (product.purchasePrice || 0) * (product.stock / 100);
     } else if (product.saleLevels?.length) {
       return product.saleLevels.reduce((total, level) => total + (level.stock * level.purchasePrice), 0);
     } else {
@@ -3895,6 +5118,8 @@ const Index = () => {
     if (product.type === 'peso') {
       const salePrice = product.salePrice ?? product.salePricePerKg ?? 0;
       return salePrice * (product.stock / 1000);
+    } else if (product.type === 'metro') {
+      return (product.salePrice || 0) * (product.stock / 100);
     } else if (product.saleLevels?.length) {
       return product.saleLevels.reduce((total, level) => total + (level.stock * level.salePrice), 0);
     } else {
@@ -3908,6 +5133,9 @@ const Index = () => {
       const salePrice = product.salePrice ?? product.salePricePerKg ?? 0;
       const profitPerKg = salePrice - purchasePrice;
       return profitPerKg * (product.stock / 1000);
+    } else if (product.type === 'metro') {
+      const profitPerMeter = (product.salePrice || 0) - (product.purchasePrice || 0);
+      return profitPerMeter * (product.stock / 100);
     } else if (product.saleLevels?.length) {
       if (!product.saleLevels?.length) return 0;
       return product.saleLevels.reduce((total, level) => total + (level.stock * (level.salePrice - level.purchasePrice)), 0);
@@ -3934,12 +5162,15 @@ const Index = () => {
     totalProducts: products.filter(p => !p.saleLevels?.length).length,
     unitProducts: products.filter(p => p.type === 'unidad').length,
     weightProducts: products.filter(p => p.type === 'peso').length,
+    metroProducts: products.filter(p => p.type === 'metro').length,
     outOfStock: products.filter(p => !p.saleLevels?.length && p.stock === 0).length,
-    lowStock: products.filter(p => !p.saleLevels?.length && p.stock > 0 && (p.type === 'peso' ? p.stock <= 500 : p.stock <= 20)).length,
+    lowStock: products.filter(p => !p.saleLevels?.length && p.stock > 0 && p.stock <= getLowStockThreshold(p)).length,
     totalStockValue: products.filter(p => !p.saleLevels?.length).reduce((total, product) => {
       if (product.type === 'peso') {
         const salePrice = product.salePrice ?? product.salePricePerKg ?? 0;
         return total + (salePrice * (product.stock / 1000));
+      } else if (product.type === 'metro') {
+        return total + ((product.salePrice || 0) * (product.stock / 100));
       } else {
         return total + (product.salePrice * product.stock);
       }
@@ -3986,25 +5217,19 @@ const Index = () => {
   const mayProdFilter = (p: Product) => p.saleLevels?.length > 0;
 
   const stockCriticoList = products
-    .filter(mayProdFilter)
     .flatMap(p => {
       if (p.type === 'mayorista') {
         return (p.saleLevels || [])
           .filter(l => l.stock <= STOCK_BAJO_THRESHOLD)
           .map(l => ({ productName: p.name, levelName: l.name, stock: l.stock }));
       }
-      if (p.stock <= STOCK_BAJO_THRESHOLD * 40) {
-        const unidadLevel = p.saleLevels?.find(l => l.name === 'Unidad');
-        return [{ productName: p.name, levelName: 'Stock total', stock: p.stock }];
-      }
       return [];
     });
 
   const stockCriticoCount = products
-    .filter(mayProdFilter)
     .filter(p => {
       if (p.type === 'mayorista') return (p.saleLevels || []).some(l => l.stock <= STOCK_BAJO_THRESHOLD);
-      return p.stock <= STOCK_BAJO_THRESHOLD * 40;
+      return false;
     }).length;
 
   const inventarioValor = products
@@ -4035,8 +5260,16 @@ const Index = () => {
     }
   };
 
-  const purchaseHeader = inventoryView === 'peso' ? 'Compra por kilo (S/)' : 'Compra por unidad (S/)';
-  const saleHeader = inventoryView === 'peso' ? 'Venta por kilo (S/)' : 'Venta por unidad (S/)';
+  const purchaseHeader = inventoryView === 'peso'
+    ? 'Compra por kilo (S/)'
+    : inventoryView === 'metro'
+      ? 'Compra por metro (S/)'
+      : 'Compra por unidad (S/)';
+  const saleHeader = inventoryView === 'peso'
+    ? 'Venta por kilo (S/)'
+    : inventoryView === 'metro'
+      ? 'Venta por metro (S/)'
+      : 'Venta por unidad (S/)';
 
   const viewSaleDetail = (sale: Sale) => {
     setSelectedSaleDetail(sale);
@@ -4054,8 +5287,60 @@ const Index = () => {
   };
 
   if (!isAuthenticated) {
+    if (showResetPasswordForm) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4 relative overflow-hidden">
+          {cargando && <LoaderFerro mensaje={cargando} />}
+          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo-600/20 blur-[120px] rounded-full" />
+          <Card className="w-full max-w-md border-slate-800 bg-slate-900/50 backdrop-blur-xl shadow-2xl overflow-hidden relative z-10">
+            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-indigo-500 to-transparent opacity-50" />
+            <CardHeader className="text-center pb-2 pt-10">
+              <div className="mx-auto w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mb-6 shadow-2xl shadow-indigo-500/20">
+                <Lock className="w-8 h-8 text-white" />
+              </div>
+              <CardTitle className="text-2xl font-black text-white tracking-tighter">
+                Nueva <span className="text-indigo-500">Contraseña</span>
+              </CardTitle>
+              <p className="text-sm text-slate-400 mt-2">Escribe tu nueva contraseña para volver a entrar.</p>
+            </CardHeader>
+            <CardContent className="space-y-5 pt-6 px-8 pb-10">
+              <div className="space-y-2">
+                <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-500 ml-1">Nueva Contraseña</Label>
+                <Input
+                  type="password"
+                  placeholder="Mínimo 6 caracteres"
+                  value={nuevaPassword}
+                  onChange={(e) => setNuevaPassword(e.target.value)}
+                  className="h-11 bg-slate-800/50 border-slate-700 text-white placeholder:text-slate-600 rounded-xl"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-500 ml-1">Confirmar Contraseña</Label>
+                <Input
+                  type="password"
+                  placeholder="Repite la contraseña"
+                  value={nuevaPassword2}
+                  onChange={(e) => setNuevaPassword2(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleGuardarNuevaPassword()}
+                  className="h-11 bg-slate-800/50 border-slate-700 text-white placeholder:text-slate-600 rounded-xl"
+                />
+              </div>
+              <Button
+                onClick={handleGuardarNuevaPassword}
+                disabled={isRecuperando}
+                className="w-full h-12 bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow-xl shadow-indigo-500/20 rounded-xl"
+              >
+                {isRecuperando ? "Guardando..." : "Guardar Contraseña"}
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      );
+    }
+
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4 relative overflow-hidden">
+        {cargando && <LoaderFerro mensaje={cargando} />}
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo-600/20 blur-[120px] rounded-full" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-600/10 blur-[120px] rounded-full" />
         
@@ -4066,7 +5351,7 @@ const Index = () => {
               <Store className="w-10 h-10 text-white" />
             </div>
             <CardTitle className="text-3xl font-black text-white tracking-tighter">
-              Caja <span className="text-indigo-500">Mágica</span>
+              Ferreteria <span className="text-indigo-500">Ebenezer</span>
             </CardTitle>
             <p className="text-sm text-slate-400 mt-2 font-medium tracking-widest uppercase opacity-70">Sistema de Gestión Profesional</p>
           </CardHeader>
@@ -4102,30 +5387,25 @@ const Index = () => {
                     className="pl-10 h-12 bg-slate-800/50 border-slate-700 text-white placeholder:text-slate-600 focus:border-indigo-500 focus:ring-indigo-500/20 rounded-xl transition-all"
                   />
                 </div>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleForgotPassword}
+                    disabled={isRecuperando}
+                    className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors"
+                  >
+                    {isRecuperando ? "Enviando correo..." : "¿Olvidaste tu contraseña?"}
+                  </button>
+                </div>
               </div>
             </div>
             <Button onClick={handleLogin} disabled={isAuthLoading} className="w-full h-12 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-lg shadow-xl shadow-indigo-500/20 transition-all active:scale-[0.98] rounded-xl">
               {isAuthLoading ? "Iniciando sesión..." : "Iniciar Sesión"}
             </Button>
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-slate-700"></div>
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-slate-900 px-2 text-slate-500 font-bold">O CONTINÚA CON</span>
-              </div>
-            </div>
-            <Button onClick={handleGoogleLogin} disabled={isAuthLoading} variant="outline" className="w-full h-12 border-slate-700 text-black hover:bg-slate-800 font-bold rounded-xl">
-              <svg className="w-5 h-5 mr-2" viewBox="0 0 24 24">
-                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/>
-                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-              </svg>
-              Google
-            </Button>
             <div className="text-center pt-4">
-              <p className="text-[10px] text-slate-600 font-bold tracking-widest uppercase">© 2026 Distribuidora MILAN Ventas</p>
+              <p className="text-[10px] text-slate-600 font-bold tracking-widest uppercase">
+                {EMPRESA.nombreComercial || 'Sistema de Ventas'}
+              </p>
             </div>
           </CardContent>
         </Card>
@@ -4135,6 +5415,7 @@ const Index = () => {
 
   return (
     <>
+      {cargando && <LoaderFerro mensaje={cargando} />}
       <div className="min-h-screen bg-slate-50/50 selection:bg-indigo-100">
       <div className="bg-slate-900 sticky top-0 z-40 border-b border-slate-800 shadow-xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -4144,7 +5425,7 @@ const Index = () => {
                 <Store className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-sm sm:text-xl font-bold text-white tracking-tight">Distribuidora MILAN</h1>
+                <h1 className="text-sm sm:text-xl font-bold text-white tracking-tight">Ferreteria Ebenezer</h1>
                 {!isMobile && <p className="text-[10px] sm:text-xs text-slate-400 font-medium uppercase tracking-widest">SISTEMA PROFESIONAL</p>}
               </div>
             </div>
@@ -4161,7 +5442,7 @@ const Index = () => {
                 </Badge>
               )}
               <Badge variant="secondary" className="bg-slate-800 text-slate-100 border-slate-700 hidden sm:flex font-medium px-3 py-1 rounded-full max-w-[180px]">
-                <span className="truncate">{users.find(u => u.email === auth.currentUser?.email)?.name || firebaseUser?.name || 'Usuario'}</span>
+                <span className="truncate">{users.find(u => u.email === getCurrentSupabaseUser()?.email)?.name || firebaseUser?.displayName || 'Usuario'}</span>
               </Badge>
               <Badge variant="secondary" className="bg-slate-800 text-indigo-400 border-slate-700 hidden sm:flex font-bold px-3 py-1 rounded-full">
                 <User className="w-3 h-3 mr-1.5" />
@@ -4171,7 +5452,7 @@ const Index = () => {
                 variant="ghost"
                 size={isMobile ? "icon" : "sm"}
                 className="text-slate-400 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors rounded-full"
-                onClick={() => setIsConfigOpen(true)}
+                onClick={() => { abrirConfigEmisor(); }}
               >
                 <Settings className="w-5 h-5" />
               </Button>
@@ -4180,6 +5461,7 @@ const Index = () => {
                 size={isMobile ? "icon" : "sm"} 
                 className="text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors rounded-full"
                 onClick={async () => {
+                  setCargando('Cerrando sesión…');
                   await firebaseLogout().catch(() => {});
                   setIsAuthenticated(false);
                   setCurrentSale([]);
@@ -4191,13 +5473,18 @@ const Index = () => {
                   setLoginEmail("");
                   setFirebaseUser(null);
                   setNewProduct({ name: '', purchasePrice: 0, salePrice: 0, stock: 0, category: '' });
-                  setNewWeightProduct({ name: "", purchasePricePerKg: 0, salePricePerKg: 0, equivalentGrams: 0, stock: 0, initialStock: 0, minWeightGrams: 0, category: "" });
+                  setNewWeightProduct({ name: "", purchasePrice: 0, salePrice: 0, purchasePricePerKg: 0, salePricePerKg: 0, equivalentGrams: 0, stock: 0, initialStock: 0, minWeightGrams: 0, category: "" });
+                  setNewMetroProduct({ name: "", purchasePrice: 0, salePrice: 0, initialStockCm: 0, category: "" });
+                  setMetroPurchaseInput('');
+                  setMetroSaleInput('');
+                  setMetroStockInput('');
       setNewUser({ password: '', name: '', role: 'empleado', email: '' });
                   setConfirmPassword('');
                   setShowPassword(false);
                   setShowConfirmPassword(false);
                   setEditingProduct(null);
                   setEditingWeightProduct(null);
+                  setEditingMetroProduct(null);
                   setEditingUser(null);
                   setEditingQuickProduct(null);
                   setSelectedSaleDetail(null);
@@ -4205,12 +5492,17 @@ const Index = () => {
                   setSelectedWeightProduct(null);
                   setWeightQuantities({});
                   setCustomWeight('');
+                  setSelectedMetroProduct(null);
+                  setMetroQuantities({});
+                  setCustomMeters('');
+                  setCustomMetroMoney('');
                   setRestockQuantities({});
                   setAdminPassword('');
                   setCloseToDelete(null);
                   setIsAddProductOpen(false);
                   setIsEditProductOpen(false);
                   setIsEditWeightProductOpen(false);
+                  setIsEditMetroProductOpen(false);
                   setIsAddUserOpen(false);
                   setIsEditUserOpen(false);
                   setIsCloseCashOpen(false);
@@ -4218,6 +5510,7 @@ const Index = () => {
                   setIsCloseDetailOpen(false);
                   setIsRestockModalOpen(false);
                   setIsWeightModalOpen(false);
+                  setIsMetroModalOpen(false);
                   setIsDeleteMode(false);
                   setIsDeleteConfirmOpen(false);
                   setIsDeleteCloseOpen(false);
@@ -4242,12 +5535,7 @@ const Index = () => {
                   setSalesSearch('');
                   setSelectedProductsToDelete([]);
                   setProductsToDelete([]);
-                  setShowEditUserPassword(false);
-                  setShowDeleteProductPassword(false);
-                  setShowAdminPassword(false);
-                  setShowClearHistoryPassword(false);
-                  setShowDeleteSalePassword(false);
-                  setShowClearSalesPassword(false);
+                  setCargando(null);
                 }}>
                 {isMobile ? <LogIn className="w-5 h-5 rotate-180" /> : "Cerrar Sesión"}
               </Button>
@@ -4270,7 +5558,7 @@ const Index = () => {
           </div>
         )}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4 sm:space-y-6">
-          <TabsList className={`flex w-full overflow-x-auto sm:grid ${userRole === 'admin' ? 'sm:grid-cols-5' : 'sm:grid-cols-3'} h-auto p-1.5 bg-slate-200/50 rounded-xl shadow-inner`}>
+          <TabsList className={`flex w-full overflow-x-auto sm:grid ${userRole === 'admin' ? 'sm:grid-cols-7' : 'sm:grid-cols-3'} h-auto p-1.5 bg-slate-200/50 rounded-xl shadow-inner`}>
             <TabsTrigger value="ventas" className="flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg data-[state=active]:bg-white data-[state=active]:text-indigo-600 data-[state=active]:shadow-md transition-all text-slate-600">
               <ShoppingCart className="w-4 h-4" />
               <span className={isMobile ? "text-xs" : ""}>Ventas</span>
@@ -4293,6 +5581,18 @@ const Index = () => {
               <TabsTrigger value="usuarios" className="flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg data-[state=active]:bg-white data-[state=active]:text-indigo-600 data-[state=active]:shadow-md transition-all text-slate-600">
                 <UserPlus className="w-4 h-4" />
                 <span className={isMobile ? "text-xs" : ""}>{isMobile ? "User" : "Usuarios"}</span>
+              </TabsTrigger>
+            )}
+            {userRole === 'admin' && (
+              <TabsTrigger value="clientes" className="flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg data-[state=active]:bg-white data-[state=active]:text-indigo-600 data-[state=active]:shadow-md transition-all text-slate-600">
+                <Users className="w-4 h-4" />
+                <span className={isMobile ? "text-xs" : ""}>{isMobile ? "Cli." : "Clientes"}</span>
+              </TabsTrigger>
+            )}
+            {userRole === 'admin' && (
+              <TabsTrigger value="emitir" className="flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg data-[state=active]:bg-white data-[state=active]:text-indigo-600 data-[state=active]:shadow-md transition-all text-slate-600">
+                <ReceiptText className="w-4 h-4" />
+                <span className={isMobile ? "text-xs" : ""}>{isMobile ? "Emit." : "Emitir"}</span>
               </TabsTrigger>
             )}
           </TabsList>
@@ -4372,15 +5672,15 @@ const Index = () => {
                                   </Badge>
                                   <Badge 
                                     variant={(() => { const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs > 0 ? "secondary" : "destructive"; })()}
-                                    className={`text-[9px] sm:text-[10px] px-1.5 py-0 font-bold ${(() => { const threshold = product.type === 'peso' ? 500 : 20; const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs > 0 && rs <= threshold ? 'bg-amber-100 text-amber-700 border-amber-200' : rs > threshold ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : ''; })()}`}
+                                    className={`text-[9px] sm:text-[10px] px-1.5 py-0 font-bold ${(() => { const threshold = getLowStockThreshold(product); const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs > 0 && rs <= threshold ? 'bg-amber-100 text-amber-700 border-amber-200' : rs > threshold ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : ''; })()}`}
                                   >
-                                    {(() => { if (product.type === 'peso') return (product.stock / 1000).toFixed(1) + 'kg'; const total = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return 'Stock: ' + total; })()}
+                                    {(() => { if (product.type === 'peso') return (product.stock / 1000).toFixed(1) + 'kg'; if (product.type === 'metro') return formatLength(product.stock); const total = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return 'Stock: ' + total; })()}
                                   </Badge>
                                 </div>
 
                                 <div className="pt-1 flex items-center justify-between border-t border-slate-50 mt-2">
                                   <span className="text-sm sm:text-lg font-black text-indigo-600">
-                    S/ {(product.salePrice || 0).toFixed(2)}{product.type === 'peso' ? <span className="text-[10px] text-slate-400 font-normal ml-0.5">/{product.stock >= 1000 ? 'kg' : 'g'}</span> : ''}
+                    S/ {(product.salePrice || 0).toFixed(2)}{product.type === 'peso' ? <span className="text-[10px] text-slate-400 font-normal ml-0.5">/{product.stock >= 1000 ? 'kg' : 'g'}</span> : product.type === 'metro' ? <span className="text-[10px] text-slate-400 font-normal ml-0.5">/m</span> : ''}
                   </span>
                                   <div className="w-6 h-6 sm:w-8 sm:h-8 rounded-full bg-slate-50 text-slate-400 flex items-center justify-center group-hover:bg-indigo-600 group-hover:text-white group-hover:shadow-lg group-hover:shadow-indigo-200 transition-all duration-300">
                                     <Plus className="w-3 h-3 sm:w-4 sm:h-4" />
@@ -4434,7 +5734,9 @@ const Index = () => {
                                     <p className="text-xs text-gray-500 mt-0.5">
                                       {item.product.type === 'peso'
                                         ? `S/ ${((item.product.salePricePerKg || 0) / 1000).toFixed(3)}/g`
-                                        : item.selectedLevelName
+                                        : item.product.type === 'metro'
+                                          ? `S/ ${(item.product.salePrice || 0).toFixed(2)}/m`
+                                          : item.selectedLevelName
                                           ? (() => {
                                               const lvl = item.product.saleLevels?.find(l => l.name === item.selectedLevelName);
                                               return `S/ ${(item.product.salePrice || 0).toFixed(2)} c/${item.selectedLevelName}${lvl ? ` (${lvl.baseUnitsContained} u)` : ''}`;
@@ -4459,18 +5761,18 @@ const Index = () => {
                                     size="icon"
                                     variant="ghost"
                                     className="h-7 w-7"
-                                    onClick={() => actualizarCantidad(item.product.id, item.quantity - (item.product.type === 'peso' ? 100 : 1))}
+                                    onClick={() => actualizarCantidad(item.product.id, item.quantity - (item.product.type === 'peso' ? 100 : item.product.type === 'metro' ? 10 : 1))}
                                   >
                                     <Minus className="w-3 h-3" />
                                   </Button>
                                   <span className="min-w-[40px] text-center text-xs font-bold">
-                                    {item.product.type === 'peso' ? formatWeight(item.quantity) : item.selectedLevelName ? `${item.quantity} ${item.selectedLevelName}(s)` : item.quantity}
+                                    {item.product.type === 'peso' ? formatWeight(item.quantity) : item.product.type === 'metro' ? formatLength(item.quantity) : item.selectedLevelName ? `${item.quantity} ${item.selectedLevelName}(s)` : item.quantity}
                                   </span>
                                   <Button
                                     size="icon"
                                     variant="ghost"
                                     className="h-7 w-7"
-                                    onClick={() => actualizarCantidad(item.product.id, item.quantity + (item.product.type === 'peso' ? 100 : 1))}
+                                    onClick={() => actualizarCantidad(item.product.id, item.quantity + (item.product.type === 'peso' ? 100 : item.product.type === 'metro' ? 10 : 1))}
                                   >
                                     <Plus className="w-3 h-3" />
                                   </Button>
@@ -4479,7 +5781,9 @@ const Index = () => {
                                   <p className="text-sm font-bold text-blue-600">
                                     S/ {item.product.type === 'peso'
                                       ? ((item.product.salePricePerKg || 0) * (item.quantity / 1000)).toFixed(2)
-                                      : ((item.product.salePrice || 0) * item.quantity).toFixed(2)}
+                                      : item.product.type === 'metro'
+                                        ? ((item.product.salePrice || 0) * (item.quantity / 100)).toFixed(2)
+                                        : ((item.product.salePrice || 0) * item.quantity).toFixed(2)}
                                   </p>
                                 </div>
                               </div>
@@ -4683,7 +5987,7 @@ const Index = () => {
                           </div>
                         </DialogTitle>
                         <DialogDescription>
-                          Productos con stock por debajo del umbral (20 unidades / 500g para peso).
+                          Productos con stock por debajo del umbral (20 unidades, 500 g para peso y 10 m para metro).
                         </DialogDescription>
                       </DialogHeader>
                       <ScrollArea className="max-h-[60vh]">
@@ -4720,7 +6024,7 @@ const Index = () => {
                                     <Badge variant="outline" className="text-[10px] font-normal">{product.category}</Badge>
                                   </TableCell>
                                   <TableCell className="text-right font-mono">
-                                    {product.type === 'peso' ? formatWeight(product.stock) : `${product.stock}`}
+                                    {product.type === 'peso' ? formatWeight(product.stock) : product.type === 'metro' ? formatLength(product.stock) : `${product.stock}`}
                                   </TableCell>
                                   <TableCell className="text-right">
                                     {(() => { const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? (
@@ -4757,6 +6061,14 @@ const Index = () => {
                   <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 w-full lg:w-auto">
                     <div className="flex bg-slate-200/50 p-1 rounded-xl">
                       <Button
+                        variant={inventoryView === 'todos' ? 'secondary' : 'ghost'}
+                        size="sm"
+                        onClick={() => setInventoryView('todos')}
+                        className="flex-1 sm:flex-none text-[10px] font-bold uppercase tracking-wider rounded-lg"
+                      >
+                        Todos
+                      </Button>
+                      <Button
                         variant={inventoryView === 'unidad' ? 'secondary' : 'ghost'}
                         size="sm"
                         onClick={() => setInventoryView('unidad')}
@@ -4771,6 +6083,14 @@ const Index = () => {
                         className="flex-1 sm:flex-none text-[10px] font-bold uppercase tracking-wider rounded-lg"
                       >
                         Peso
+                      </Button>
+                      <Button
+                        variant={inventoryView === 'metro' ? 'secondary' : 'ghost'}
+                        size="sm"
+                        onClick={() => setInventoryView('metro')}
+                        className="flex-1 sm:flex-none text-[10px] font-bold uppercase tracking-wider rounded-lg"
+                      >
+                        Metro
                       </Button>
                     </div>
                     <div className="flex gap-2">
@@ -4848,18 +6168,20 @@ const Index = () => {
                               <TableCell className="border-r text-xs font-medium text-blue-600 bg-blue-50">
                                 S/ {product.type === 'peso' ? (product.purchasePrice ?? product.purchasePricePerKg ?? 0).toFixed(2) : (product.purchasePrice || 0).toFixed(2)}
                                 {product.type === 'peso' && <span className="text-[10px] text-gray-400 ml-0.5">/kg</span>}
+                                {product.type === 'metro' && <span className="text-[10px] text-gray-400 ml-0.5">/m</span>}
                               </TableCell>
                             )}
                             <TableCell className="border-r text-xs font-bold text-green-600 bg-green-50">
                               S/ {product.type === 'peso' ? (product.salePrice ?? product.salePricePerKg ?? 0).toFixed(2) : (product.salePrice || 0).toFixed(2)}
                               {product.type === 'peso' && <span className="text-[10px] text-gray-400 ml-0.5">/kg</span>}
+                              {product.type === 'metro' && <span className="text-[10px] text-gray-400 ml-0.5">/m</span>}
                             </TableCell>
 
                             <TableCell className="border-r">
                               <Badge
                                 variant="secondary"
-                                className={`text-[10px] ${(() => { const threshold = product.type === 'peso' ? 500 : 20; const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? 'bg-red-100 text-red-700' : rs <= threshold ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'; })()}`}>
-                                {(() => { const threshold = product.type === 'peso' ? 500 : 20; const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? 'Agotado' : rs <= threshold ? 'Bajo' : 'OK'; })()}
+                                className={`text-[10px] ${(() => { const threshold = getLowStockThreshold(product); const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? 'bg-red-100 text-red-700' : rs <= threshold ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'; })()}`}>
+                                {(() => { const threshold = getLowStockThreshold(product); const rs = product.type === 'mayorista' ? (product.saleLevels || []).reduce((s, l) => s + (l.stock || 0), 0) : product.stock; return rs === 0 ? 'Agotado' : rs <= threshold ? 'Bajo' : 'OK'; })()}
                               </Badge>
                             </TableCell>
                             {userRole === 'admin' && (
@@ -4947,11 +6269,11 @@ const Index = () => {
                   setIsStockCriticoOpen(true);
                 }}
               >
-                <div className="h-1 w-full bg-rose-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                <div className="h-1 w-full bg-amber-500 opacity-0 group-hover:opacity-100 transition-opacity" />
                 <CardContent className="p-3 sm:p-4">
                   <div className="text-center">
-                    <AlertTriangle className="w-6 h-6 sm:w-8 sm:h-8 mx-auto mb-1 sm:mb-2 text-rose-600" />
-                    <p className="text-[10px] sm:text-xs text-slate-500 font-bold uppercase tracking-widest">Stock Crítico</p>
+                    <AlertTriangle className="w-6 h-6 sm:w-8 sm:h-8 mx-auto mb-1 sm:mb-2 text-amber-600" />
+                    <p className="text-[10px] sm:text-xs text-slate-500 font-bold uppercase tracking-widest">Stock Bajo Mayorista</p>
                     <p className="text-lg sm:text-2xl font-black text-slate-900">{mayoristaStats.stockCriticoCount}</p>
                   </div>
                 </CardContent>
@@ -5191,7 +6513,7 @@ const Index = () => {
                     <p className="text-[10px] sm:text-xs text-slate-500 font-bold uppercase tracking-widest">Prods Vendidos</p>
                     <p className="text-lg sm:text-2xl font-black text-slate-900">
                       {todaysSales.reduce((total, sale) => total + sale.items.reduce((itemSum, item) => {
-                        return item.product.type === 'peso' ? itemSum + 1 : itemSum + item.quantity;
+                        return (item.product.type === 'peso' || item.product.type === 'metro') ? itemSum + 1 : itemSum + item.quantity;
                       }, 0), 0)}
                     </p>
                   </div>
@@ -5299,7 +6621,7 @@ const Index = () => {
                               {new Date(sale.date).toLocaleTimeString('es-PE', { hour: 'numeric', minute: '2-digit', hour12: true })}
                             </TableCell>
                             <TableCell className="border-r font-mono text-xs">
-                              {sale.id}
+                              #{ticketNumberOf(sale.id)}
                             </TableCell>
                             <TableCell className="border-r">
                               <Badge variant="outline" className={`text-[10px] font-normal capitalize ${getPaymentMethodColor(sale.paymentMethod)}`}>
@@ -5328,6 +6650,11 @@ const Index = () => {
                                     Peso
                                   </Badge>
                                 )}
+                                {sale.items.some(item => item.product.type === 'metro') && (
+                                  <Badge className="text-[9px] bg-cyan-100 text-cyan-700 border-cyan-200">
+                                    Metro
+                                  </Badge>
+                                )}
                               </div>
                             </TableCell>
                             <TableCell className="border-r text-right text-xs font-bold text-green-600">
@@ -5339,22 +6666,24 @@ const Index = () => {
                               </TableCell>
                             )}
                             <TableCell className="text-right">
-                              <Button size="sm" variant="ghost" className="h-8 text-indigo-600" onClick={() => viewBoleta(sale)}>
-                                <FileText className="w-3 h-3 mr-1" />
-                                <span className="hidden sm:inline">Boleta</span>
-                              </Button>
-                              <Button size="sm" variant="ghost" className="h-8 text-blue-600" onClick={() => viewSaleDetail(sale)}>
-                                <Eye className="w-3 h-3 mr-1" />
-                                <span className="hidden sm:inline">Ver</span>
-                              </Button>
-                              {userRole === 'admin' && (
-                                <Button size="icon" variant="ghost" className="h-8 w-8 text-red-600" onClick={() => {
-                                  setSaleToDelete(sale);
-                                  setIsDeleteSaleOpen(true);
-                                }}>
-                                  <Trash2 className="w-4 h-4" />
+                              <div className="flex justify-end gap-1">
+                                <Button size="sm" variant="ghost" className="h-8 text-slate-600" onClick={() => viewBoleta(sale)}>
+                                  <FileText className="w-3 h-3 mr-1" />
+                                  <span className="hidden sm:inline">Ticket</span>
                                 </Button>
-                              )}
+                                <Button size="sm" variant="ghost" className="h-8 text-blue-600" onClick={() => viewSaleDetail(sale)}>
+                                  <Eye className="w-3 h-3 mr-1" />
+                                  <span className="hidden sm:inline">Ver</span>
+                                </Button>
+                                {userRole === 'admin' && (
+                                  <Button size="icon" variant="ghost" className="h-8 w-8 text-red-600" onClick={() => {
+                                    setSaleToDelete(sale);
+                                    setIsDeleteSaleOpen(true);
+                                  }}>
+                                    <Trash2 className="w-4 h-4" />
+                                  </Button>
+                                )}
+                              </div>
                             </TableCell>
                           </TableRow>
                         ))}
@@ -5460,8 +6789,6 @@ const Index = () => {
                             value={newUser.email}
                             onChange={(e) => { setNewUser({ ...newUser, email: e.target.value }); setFieldErrors(prev => ({ ...prev, email: '' })); }} />
                         </div>
-                        {newUser.role !== 'admin' && (
-                        <>
                         <div className="space-y-2">
                           <Label>Contraseña</Label>
                           <div className="relative">
@@ -5482,6 +6809,7 @@ const Index = () => {
                               {showPassword ? <EyeOff className="w-4 h-4 text-slate-400" /> : <Eye className="w-4 h-4 text-slate-400" />}
                             </Button>
                           </div>
+                          {fieldErrors.password && <p className="text-[11px] text-red-500">{fieldErrors.password}</p>}
                         </div>
                         <div className="space-y-2">
                           <Label>Confirmar Contraseña</Label>
@@ -5503,50 +6831,23 @@ const Index = () => {
                               {showConfirmPassword ? <EyeOff className="w-4 h-4 text-slate-400" /> : <Eye className="w-4 h-4 text-slate-400" />}
                             </Button>
                           </div>
+                          {fieldErrors.confirmPassword && <p className="text-[11px] text-red-500">{fieldErrors.confirmPassword}</p>}
                         </div>
-                        </>
-                        )}
                         {newUser.role === 'admin' && (
-                          <>
                           <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-3">
                             <div className="flex gap-2">
                               <User className="w-4 h-4 text-indigo-600 flex-shrink-0 mt-0.5" />
                               <div>
-                                <p className="text-xs font-medium text-indigo-800">Inicio de sesión con Google</p>
-                                <p className="text-[11px] text-indigo-600 mt-0.5">El administrador iniciará sesión con su cuenta de Google usando este correo.</p>
+                                <p className="text-xs font-medium text-indigo-800">Se crea la cuenta desde aquí</p>
+                                <p className="text-[11px] text-indigo-600 mt-0.5">Al guardar se crea el acceso con el rol y el nombre indicados.</p>
                               </div>
                             </div>
                           </div>
-                          <div className="space-y-2">
-                            <Label>Contraseña (para acceso offline)</Label>
-                            <div className="relative">
-                              <Input
-                                type={showPassword ? 'text' : 'password'}
-                                placeholder="Opcional - para cuando no hay internet"
-                                value={newUser.password}
-                                autoComplete="new-password"
-                                onChange={(e) => { setNewUser({ ...newUser, password: e.target.value }); setFieldErrors(prev => ({ ...prev, password: '' })); }} />
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                className="absolute right-0 top-0 h-full px-3"
-                                onClick={() => setShowPassword(!showPassword)}
-                              >
-                                {showPassword ? <EyeOff className="w-4 h-4 text-slate-400" /> : <Eye className="w-4 h-4 text-slate-400" />}
-                              </Button>
-                            </div>
-                          </div>
-                          </>
                         )}
                         <div className="space-y-2">
                           <Label>Rol</Label>
                           <Select value={newUser.role} onValueChange={(value: 'admin' | 'empleado') => {
-                            setNewUser({ ...newUser, role: value });
-                            if (value === 'admin') {
-                              setNewUser(prev => ({ ...prev, password: '', role: 'admin' }));
-                              setConfirmPassword('');
-                            }
+                            setNewUser(prev => ({ ...prev, role: value }));
                           }}>
                             <SelectTrigger>
                               <SelectValue />
@@ -5610,8 +6911,9 @@ const Index = () => {
                                   size="icon"
                                   variant="ghost"
                                   className="h-8 w-8 text-red-600"
-                                  onClick={() => eliminarUsuario(user.id)}
-                                  disabled={auth.currentUser?.email === user.email}
+                                  onClick={() => user.role === 'empleado' ? setUsuarioAEliminar(user) : null}
+                                  disabled={user.role === 'admin' || getCurrentSupabaseUser()?.email === user.email}
+                                  title={user.role === 'admin' ? 'Los administradores no se eliminan desde la app' : 'Eliminar empleado'}
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </Button>
@@ -5625,6 +6927,570 @@ const Index = () => {
                 </div>
               </CardContent>
             </Card>
+          </TabsContent>
+        )}
+
+        {userRole === 'admin' && (
+          <TabsContent value="clientes" className="space-y-4 sm:space-y-6">
+            <Card>
+              <CardHeader className="p-4 sm:p-6">
+                <CardTitle className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <span>Clientes</span>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+                    <div className="relative flex-1 sm:w-64">
+                      <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <Input className="pl-10 h-10 border-slate-200 focus:border-indigo-500 rounded-xl" placeholder="Buscar por documento o nombre…" value={clientesBusca} onChange={(e) => setClientesBusca(e.target.value)} />
+                    </div>
+                    <Button className="bg-blue-600 hover:bg-blue-700 text-white h-9" onClick={abrirNuevoCliente}>
+                      <UserPlus className="w-4 h-4 mr-2" />
+                      <span className="hidden sm:inline">Nuevo Cliente</span>
+                      <span className="sm:hidden">Nuevo</span>
+                    </Button>
+                  </div>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-0 sm:p-6 sm:pt-0">
+                <div className="border-t sm:border rounded-lg">
+                  <div className="overflow-auto h-[500px]">
+                    <Table>
+                      <TableHeader className="sticky top-0 bg-white z-10">
+                        <TableRow className="bg-gray-50/50">
+                          <TableHead className="border-r hidden sm:table-cell w-24">Tipo</TableHead>
+                          <TableHead className="border-r">Nº Documento</TableHead>
+                          <TableHead className="border-r">Razón Social</TableHead>
+                          <TableHead className="border-r hidden sm:table-cell">Teléfono</TableHead>
+                          <TableHead className="border-r hidden sm:table-cell">Correo</TableHead>
+                          <TableHead className="text-right">Acciones</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {clients.length === 0 && (
+                          <TableRow>
+                            <TableCell colSpan={6} className="text-center text-slate-400 py-8">
+                              No hay clientes registrados todavía.
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        {clients.length > 0 && clientesFiltradosTab.length === 0 && (
+                          <TableRow>
+                            <TableCell colSpan={6} className="text-center text-slate-400 py-8">
+                              Sin resultados para "{clientesBusca}".
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        {clientesFiltradosTab.map((c) => (
+                          <TableRow key={c.id} className="hover:bg-gray-50/50 text-xs sm:text-sm">
+                            <TableCell className="border-r hidden sm:table-cell whitespace-nowrap">
+                              <Badge variant="outline" className="text-[10px]">{tipoDocClienteLabel(c.tipoDocumento)}</Badge>
+                            </TableCell>
+                            <TableCell className="border-r font-medium whitespace-nowrap">
+                              {c.numeroDocumento}
+                            </TableCell>
+                            <TableCell className="border-r">{c.razonSocial}</TableCell>
+                            <TableCell className="border-r hidden sm:table-cell text-gray-500">{c.telefono || '-'}</TableCell>
+                            <TableCell className="border-r hidden sm:table-cell text-gray-500">{c.email || '-'}</TableCell>
+                            <TableCell className="text-right">
+                              <div className="flex justify-end gap-1">
+                                <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-600" onClick={() => setClienteVer(c)}>
+                                  <Eye className="w-4 h-4" />
+                                </Button>
+                                <Button size="icon" variant="ghost" className="h-8 w-8 text-blue-600" onClick={() => abrirEditarCliente(c)}>
+                                  <Edit className="w-4 h-4" />
+                                </Button>
+                                <Button size="icon" variant="ghost" className="h-8 w-8 text-red-600" onClick={() => setClientToDelete(c)}>
+                                  <Trash2 className="w-4 h-4" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Dialog open={isAddClientOpen} onOpenChange={(open) => { setIsAddClientOpen(open); if (!open) { setClientToEdit(null); setClientErrors({}); } }}>
+              <DialogContent className="sm:max-w-[440px]">
+                <DialogHeader>
+                  <DialogTitle>{clientToEdit ? 'Editar Cliente' : 'Agregar Nuevo Cliente'}</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-2">
+                  <div className="space-y-2">
+                    <Label>Tipo de Documento</Label>
+                    <Select value={clientForm.tipoDocumento} onValueChange={(v) => setClientForm(prev => ({ ...prev, tipoDocumento: v }))}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="6">RUC</SelectItem>
+                        <SelectItem value="1">DNI</SelectItem>
+                        <SelectItem value="4">Carné de Extranjería</SelectItem>
+                        <SelectItem value="7">Pasaporte</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                    <div className="space-y-2">
+                      <Label>Número de Documento</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          className={clientErrors.numeroDocumento ? 'border-red-500' : ''}
+                          placeholder="Ej: 20614583968"
+                          value={clientForm.numeroDocumento}
+                          onChange={(e) => { setClientForm(prev => ({ ...prev, numeroDocumento: e.target.value })); setClientErrors(prev => ({ ...prev, numeroDocumento: '' })); }} />
+                        {clientForm.tipoDocumento === '6' && (
+                          <Button type="button" variant="outline" className="shrink-0" disabled={isConsultingRuc} onClick={consultarRucCliente}>
+                            <Search className="w-4 h-4 mr-1" />
+                            {isConsultingRuc ? 'Consultando…' : 'Consultar'}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Razón Social / Nombre</Label>
+                      <Input
+                        className={clientErrors.razonSocial ? 'border-red-500' : ''}
+                        value={clientForm.razonSocial}
+                        onChange={(e) => { setClientForm(prev => ({ ...prev, razonSocial: e.target.value })); setClientErrors(prev => ({ ...prev, razonSocial: '' })); }} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Dirección Fiscal</Label>
+                      <Input value={clientForm.direccion} onChange={(e) => setClientForm(prev => ({ ...prev, direccion: e.target.value }))} />
+                    </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-2">
+                      <Label>Teléfono</Label>
+                      <Input value={clientForm.telefono} onChange={(e) => setClientForm(prev => ({ ...prev, telefono: e.target.value }))} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Correo</Label>
+                      <Input type="email" value={clientForm.email} onChange={(e) => setClientForm(prev => ({ ...prev, email: e.target.value }))} />
+                    </div>
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setIsAddClientOpen(false)}>Cancelar</Button>
+                  <Button className="bg-blue-600 hover:bg-blue-700" onClick={guardarCliente}>
+                    {clientToEdit ? 'Guardar Cambios' : 'Guardar Cliente'}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog open={clienteVer !== null} onOpenChange={(open) => { if (!open) setClienteVer(null); }}>
+              <DialogContent className="sm:max-w-[520px] p-0 gap-0 overflow-hidden">
+                <DialogHeader className="border-b border-slate-100 bg-slate-50/70 px-6 py-5 text-left">
+                  <DialogTitle className="text-lg font-bold tracking-tight text-slate-900 sm:text-xl">Información del Cliente</DialogTitle>
+                  <DialogDescription className="pt-0.5 text-xs font-medium text-slate-500">Consulta RUC • SUNAT Perú</DialogDescription>
+                </DialogHeader>
+                {clienteVer && (
+                  <div className="space-y-5 px-6 py-5">
+                    {/* Tarjeta del documento */}
+                    <section className="rounded-xl border border-slate-200/80 bg-slate-50/50 p-4">
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <span className="inline-flex items-center rounded-md bg-slate-800 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-white shadow-sm">
+                          {tipoDocClienteLabel(clienteVer.tipoDocumento)}
+                        </span>
+                        <span className="font-mono text-xl font-bold tracking-wider text-slate-900 sm:text-2xl">
+                          {clienteVer.numeroDocumento}
+                        </span>
+                        <button
+                          type="button"
+                          title="Copiar número de documento"
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(clienteVer.numeroDocumento);
+                            toast({ title: 'Copiado', description: `${clienteVer.numeroDocumento} copiado al portapapeles.` });
+                          }}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white hover:text-blue-600 hover:shadow-sm active:scale-95"
+                        >
+                          <Copy className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </section>
+
+                    {/* Datos del cliente */}
+                    <section className="divide-y divide-slate-100 rounded-xl border border-slate-200/90 bg-white">
+                      <div className="flex flex-col gap-1 p-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                        <dt className="text-xs font-semibold uppercase tracking-wider text-slate-500 sm:w-1/3">Razón Social</dt>
+                        <dd className="flex flex-wrap items-center justify-end gap-2 text-right sm:w-2/3">
+                          <span className="text-sm font-bold tracking-tight text-slate-900 sm:text-base">{clienteVer.razonSocial}</span>
+                          <span className="inline-flex shrink-0 items-center rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 ring-1 ring-inset ring-blue-700/10">
+                            {clienteVer.tipoDocumento === '6' && clienteVer.numeroDocumento.startsWith('20') ? 'Persona Jurídica' : 'Persona Natural'}
+                          </span>
+                        </dd>
+                      </div>
+                      <div className="flex flex-col gap-1 p-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                        <dt className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500 sm:w-1/3">
+                          <MapPin className="h-4 w-4 shrink-0 text-slate-400" /> Dirección
+                        </dt>
+                        <dd className="text-right text-sm font-medium leading-relaxed text-slate-800 sm:w-2/3">
+                          {clienteVer.direccion || <span className="text-xs italic text-slate-400 sm:text-sm">— Sin registrar —</span>}
+                        </dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-4 p-3.5">
+                        <dt className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500 sm:w-1/3">
+                          <Phone className="h-4 w-4 shrink-0 text-slate-400" /> Teléfono
+                        </dt>
+                        <dd className="text-right sm:w-2/3">
+                          {clienteVer.telefono
+                            ? <span className="text-sm font-medium text-slate-800">{clienteVer.telefono}</span>
+                            : <span className="text-xs italic text-slate-400 sm:text-sm">— Sin registrar —</span>}
+                        </dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-4 p-3.5">
+                        <dt className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500 sm:w-1/3">
+                          <Mail className="h-4 w-4 shrink-0 text-slate-400" /> Correo
+                        </dt>
+                        <dd className="break-all text-right sm:w-2/3">
+                          {clienteVer.email
+                            ? <span className="text-sm font-medium text-slate-800">{clienteVer.email}</span>
+                            : <span className="text-xs italic text-slate-400 sm:text-sm">— Sin registrar —</span>}
+                        </dd>
+                      </div>
+                    </section>
+                  </div>
+                )}
+                <DialogFooter className="border-t border-slate-100 bg-slate-50/80 px-6 py-4">
+                  <Button variant="outline" className="rounded-xl" onClick={() => setClienteVer(null)}>Cerrar</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog open={clientToDelete !== null} onOpenChange={(open) => { if (!open) setClientToDelete(null); }}>
+              <DialogContent className="sm:max-w-[420px]">
+                <DialogHeader>
+                  <DialogTitle className="text-red-600">Eliminar Cliente</DialogTitle>
+                </DialogHeader>
+                {clientToDelete && (
+                  <div className="space-y-4">
+                    <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                      <p className="text-sm font-semibold text-red-800">{clientToDelete.razonSocial}</p>
+                      <p className="text-sm text-red-700">{clientToDelete.numeroDocumento}</p>
+                    </div>
+                    <p className="text-sm text-slate-500 leading-relaxed">
+                      El cliente dejará de aparecer en la lista. Las ventas históricas no se borran.
+                    </p>
+                    <div className="flex gap-3 justify-end">
+                      <Button variant="outline" onClick={() => setClientToDelete(null)}>Cancelar</Button>
+                      <Button variant="destructive" onClick={eliminarCliente}>Eliminar</Button>
+                    </div>
+                  </div>
+                )}
+              </DialogContent>
+            </Dialog>
+          </TabsContent>
+        )}
+
+        {userRole === 'admin' && (
+          <TabsContent value="emitir" className="space-y-4 sm:space-y-6">
+            <Card>
+              <CardHeader className="p-4 sm:p-6">
+                <CardTitle className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <span>Comprobantes</span>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+                    <div className="flex bg-slate-200/50 p-1 rounded-xl">
+                      <Button
+                        variant={comprobanteFiltro === 'all' ? 'secondary' : 'ghost'}
+                        size="sm"
+                        onClick={() => setComprobanteFiltro('all')}
+                        className={`h-8 rounded-lg text-[10px] font-bold uppercase tracking-widest ${comprobanteFiltro === 'all' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        Todas
+                      </Button>
+                      <Button
+                        variant={comprobanteFiltro === '03' ? 'secondary' : 'ghost'}
+                        size="sm"
+                        onClick={() => setComprobanteFiltro('03')}
+                        className={`h-8 rounded-lg text-[10px] font-bold uppercase tracking-widest ${comprobanteFiltro === '03' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        Boletas
+                      </Button>
+                      <Button
+                        variant={comprobanteFiltro === '01' ? 'secondary' : 'ghost'}
+                        size="sm"
+                        onClick={() => setComprobanteFiltro('01')}
+                        className={`h-8 rounded-lg text-[10px] font-bold uppercase tracking-widest ${comprobanteFiltro === '01' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        Facturas
+                      </Button>
+                    </div>
+                    <div className="relative flex-1 sm:w-64">
+                      <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400 w-4 h-4" />
+                      <Input
+                        placeholder="Buscar comprobante..."
+                        value={comprobanteBusca}
+                        onChange={(e) => setComprobanteBusca(e.target.value)}
+                        className="pl-10 h-10 border-slate-200 focus:border-indigo-500 rounded-xl" />
+                    </div>
+                    <Button className="bg-blue-600 hover:bg-blue-700 text-white h-9" onClick={abrirEmitir}>
+                      <ReceiptText className="w-4 h-4 mr-2" />
+                      Emitir
+                    </Button>
+                  </div>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-0 sm:p-6 sm:pt-0">
+                {!emisor && (
+                  <div className="mx-4 sm:mx-0 mb-4 px-4 py-3 bg-yellow-100 border border-yellow-400 text-yellow-800 rounded-xl flex items-center gap-3">
+                    <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                    <p className="text-sm font-semibold">Configura la Empresa (RUC y razón social) en "Configuración de Impresión y Empresa" antes de emitir comprobantes.</p>
+                  </div>
+                )}
+                <div className="border-t sm:border rounded-lg">
+                  <div className="overflow-auto h-[500px]">
+                    <Table>
+                      <TableHeader className="sticky top-0 bg-white z-10">
+                        <TableRow className="bg-gray-50/50">
+                          <TableHead className="border-r">Número</TableHead>
+                          <TableHead className="border-r">Tipo</TableHead>
+                          <TableHead className="border-r hidden sm:table-cell">Cliente</TableHead>
+                          <TableHead className="border-r">Total</TableHead>
+                          <TableHead className="border-r">Estado</TableHead>
+                          <TableHead className="border-r hidden sm:table-cell">Fecha</TableHead>
+                          <TableHead className="text-right">Acciones</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {comprobantes.length === 0 && (
+                          <TableRow>
+                            <TableCell colSpan={7} className="text-center text-slate-400 py-8">
+                              Todavía no se ha emitido ningún comprobante.
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        {comprobantes.length > 0 && comprobantesFiltrados.length === 0 && (
+                          <TableRow>
+                            <TableCell colSpan={7} className="text-center text-slate-400 py-8">
+                              Sin resultados para "{comprobanteBusca}".
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        {comprobantesFiltrados.map((c) => {
+                          const cliente = clients.find(cl => cl.id === c.cliente_id);
+                          return (
+                            <TableRow key={c.id} className="hover:bg-gray-50/50 text-xs sm:text-sm">
+                              <TableCell className="border-r font-medium whitespace-nowrap">{c.numero}</TableCell>
+                              <TableCell className="border-r">{tipoComprobanteLabel(c.tipo_documento)}</TableCell>
+                              <TableCell className="border-r hidden sm:table-cell">{cliente?.razonSocial || '-'}</TableCell>
+                              <TableCell className="border-r">S/ {c.total_venta.toFixed(2)}</TableCell>
+                              <TableCell className="border-r">
+                                <Badge
+                                  className={`text-[10px] capitalize border-transparent ${
+                                    c.estado === 'anulado'
+                                      ? 'bg-red-100 text-red-700'
+                                      : c.estado === 'emitido' || c.estado === 'emitido_local'
+                                        ? 'bg-green-100 text-green-700'
+                                        : 'bg-amber-100 text-amber-700'
+                                  }`}>
+                                  {c.estado}
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="border-r hidden sm:table-cell text-gray-500">
+                                {new Date(c.fecha_emision).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric' })}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <div className="flex justify-end gap-1">
+                                  <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-600" onClick={() => void verComprobanteOriginal(c)}>
+                                    <Eye className="w-4 h-4" />
+                                  </Button>
+                                  <Button size="icon" variant="ghost" className="h-8 w-8 text-red-600" disabled={c.estado === 'anulado'} onClick={() => setComprobanteAnular(c)}>
+                                    <X className="w-4 h-4" />
+                                  </Button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Dialog open={isEmitOpen} onOpenChange={setIsEmitOpen}>
+              <DialogContent className="sm:max-w-[560px]">
+                <DialogHeader>
+                  <DialogTitle>Emitir Comprobante</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-2">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label>Venta</Label>
+                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!emitirSoloHoy}
+                          onChange={(e) => setEmitirSoloHoy(!e.target.checked)}
+                          className="rounded border-slate-300"
+                        />
+                        Mostrar todas las ventas sin comprobante
+                      </label>
+                    </div>
+                    <Combobox
+                      options={ventaOptions}
+                      value={emitForm.ventaId}
+                      onChange={(v) => setEmitForm(prev => ({ ...prev, ventaId: v }))}
+                      placeholder="Selecciona una venta"
+                      searchPlaceholder="Buscar por #Ticket, fecha o monto…"
+                      emptyText={ventasPendientes.length === 0 ? (emitirSoloHoy ? 'No hay ventas del día pendientes de comprobante' : 'No hay ventas pendientes de comprobante') : 'Sin resultados'}
+                      columns={
+                        <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                          <span className="w-12">Ticket #</span>
+                          <span className="flex-1">Fecha y Hora</span>
+                          <span>Importe Total</span>
+                        </div>
+                      }
+                      badge={
+                        <span className="shrink-0 rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700 whitespace-nowrap">
+                          {ventasPendientesCount} pendientes{emitirSoloHoy ? ' (hoy)' : ''}
+                        </span>
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Tipo de Comprobante</Label>
+                    <Select
+                      value={emitForm.tipoDocumento}
+                      onValueChange={(v) => {
+                        const serie = series.find(s => s.tipo_documento === v);
+                        setEmitForm(prev => ({ ...prev, tipoDocumento: v, serie: serie?.serie ?? '' }));
+                        if (v !== '01') {
+                          setEmitClienteNoRegistrado(null);
+                          setEmitRucInput('');
+                        }
+                      }}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="03">Boleta de Venta</SelectItem>
+                        <SelectItem value="01">Factura</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Serie</Label>
+                    {(() => {
+                      const serieActual = series.find(s => s.serie === emitForm.serie);
+                      if (serieActual) {
+                        return (
+                          <div className="rounded-lg border bg-slate-50 px-3 py-2 text-sm text-slate-700 flex items-center justify-between">
+                            <span className="font-semibold">{serieActual.serie}</span>
+                            {serieActual.descripcion && <span className="text-slate-500 text-xs">{serieActual.descripcion}</span>}
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                          No hay una serie activa para {emitForm.tipoDocumento === '01' ? 'Factura' : 'Boleta'}.
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Cliente {emitForm.tipoDocumento === '01' ? '(RUC obligatorio)' : '(opcional)'}</Label>
+                    {emitForm.tipoDocumento === '01' && (
+                      <div className="flex gap-2">
+                        <Input
+                          placeholder="Escribe el RUC y consulta"
+                          value={emitRucInput}
+                          onChange={(e) => setEmitRucInput(e.target.value)} />
+                        <Button type="button" variant="outline" className="shrink-0" disabled={isConsultandoRucEmit} onClick={consultarRucEnEmitir}>
+                          <Search className="w-4 h-4 mr-1" />
+                          {isConsultandoRucEmit ? 'Consultando…' : 'RUC'}
+                        </Button>
+                      </div>
+                    )}
+                    <Combobox
+                      options={clienteOptions}
+                      value={emitForm.clienteId || 'none'}
+                      onChange={(v) => setEmitForm(prev => ({ ...prev, clienteId: v === 'none' ? '' : v }))}
+                      placeholder="Selecciona cliente"
+                      searchPlaceholder="Buscar cliente por documento o nombre…"
+                      emptyText="Sin resultados"
+                    />
+                    {(() => {
+                      const clienteSel = emitForm.clienteId ? clients.find(cl => cl.id === emitForm.clienteId) : null;
+                      if (!clienteSel && !emitClienteNoRegistrado) return null;
+                      const esNuevo = !clienteSel && !!emitClienteNoRegistrado;
+                      const info = clienteSel
+                        ? { razonSocial: clienteSel.razonSocial, direccion: clienteSel.direccion }
+                        : { razonSocial: emitClienteNoRegistrado!.razonSocial, direccion: emitClienteNoRegistrado!.direccion };
+                      return (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
+                          <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Datos del Cliente</p>
+                          <div className="flex justify-between gap-3 text-xs">
+                            <span className="text-slate-500">Razón Social</span>
+                            <span className="font-medium text-slate-900 text-right">{info.razonSocial}</span>
+                          </div>
+                          <div className="flex justify-between gap-3 text-xs">
+                            <span className="text-slate-500">Dirección fiscal</span>
+                            <span className="font-medium text-slate-900 text-right">{info.direccion || '-'}</span>
+                          </div>
+                          {esNuevo && (
+                            <>
+                              <p className="text-amber-700 text-xs">Cliente no registrado: se guardará al emitir.</p>
+                              <Button type="button" size="sm" className="bg-amber-600 hover:bg-amber-700 text-white w-full" onClick={registrarClienteDesdeEmitir}>
+                                <UserPlus className="w-4 h-4 mr-1" /> Registrar cliente ahora
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm text-green-700">
+                    Total: <span className="font-semibold text-green-800">
+                      S/ {(sales.find(s => s.id === emitForm.ventaId)?.total ?? 0).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setIsEmitOpen(false)}>Cancelar</Button>
+                  <Button className="bg-blue-600 hover:bg-blue-700" disabled={isEmitting} onClick={emitirComprobanteActual}>
+                    {isEmitting ? 'Emitiendo…' : 'Emitir Comprobante'}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog open={isConfirmarClienteOpen} onOpenChange={setIsConfirmarClienteOpen}>
+              <DialogContent className="sm:max-w-[420px]">
+                <DialogHeader>
+                  <DialogTitle className="text-amber-600">Cliente no registrado</DialogTitle>
+                  <DialogDescription>
+                    El cliente <span className="font-semibold text-amber-700">{emitClienteNoRegistrado?.razonSocial}</span> no está en tu lista de clientes. Se guardará automáticamente y la factura se emitirá con sus datos.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="flex gap-3 justify-end">
+                  <Button variant="outline" onClick={() => setIsConfirmarClienteOpen(false)} disabled={isEmitting}>Cancelar</Button>
+                  <Button className="bg-blue-600 hover:bg-blue-700" disabled={isEmitting} onClick={confirmarRegistrarClienteYEmitir}>
+                    {isEmitting ? 'Guardando…' : 'Guardar y emitir'}
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog open={comprobanteAnular !== null} onOpenChange={(open) => { if (!open) setComprobanteAnular(null); }}>
+              <DialogContent className="sm:max-w-[420px]">
+                <DialogHeader>
+                  <DialogTitle className="text-red-600">Anular Comprobante</DialogTitle>
+                </DialogHeader>
+                {comprobanteAnular && (
+                  <div className="space-y-4">
+                    <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                      <p className="text-sm font-semibold text-red-800">{comprobanteAnular.numero}</p>
+                      <p className="text-sm text-red-700">S/ {comprobanteAnular.total_venta.toFixed(2)}</p>
+                    </div>
+                    <p className="text-sm text-slate-500 leading-relaxed">
+                      El comprobante quedará marcado como <span className="font-semibold text-slate-700">anulado</span>. El número no se reutiliza.
+                    </p>
+                    <div className="flex gap-3 justify-end">
+                      <Button variant="outline" onClick={() => setComprobanteAnular(null)}>Cancelar</Button>
+                      <Button variant="destructive" onClick={anularComprobanteActual}>Anular</Button>
+                    </div>
+                  </div>
+                )}
+              </DialogContent>
+            </Dialog>
           </TabsContent>
         )}
       </Tabs>
@@ -5646,7 +7512,7 @@ const Index = () => {
                   <p className="text-sm text-gray-600">Productos</p>
                   <p className="text-xl font-bold text-blue-600">
                     {todaysSales.reduce((sum, sale) => sum + sale.items.reduce((itemSum, item) => {
-                      return item.product.type === 'peso' ? itemSum + 1 : itemSum + item.quantity;
+                      return (item.product.type === 'peso' || item.product.type === 'metro') ? itemSum + 1 : itemSum + item.quantity;
                     }, 0), 0)}
                   </p>
                 </div>
@@ -5700,191 +7566,175 @@ const Index = () => {
           </div>
         </DialogContent>
       </Dialog><Dialog open={isDetailOpen} onOpenChange={setIsDetailOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Detalle de Venta</DialogTitle>
-
-          </DialogHeader>
+        <DialogContent className="max-w-2xl p-0 overflow-hidden" hideClose>
           {selectedSaleDetail && (
-            <div className="space-y-6">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div>
-                  <p className="text-sm text-gray-600">Fecha</p>
-                  <p className="font-medium">{new Date(selectedSaleDetail.date).toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric' })}</p>
-                  <p className="text-sm text-gray-600 mt-1">{new Date(selectedSaleDetail.date).toLocaleTimeString('es-PE', { hour: 'numeric', minute: '2-digit', hour12: true })}</p>
+            <div className="flex flex-col max-h-[92vh]">
+              <header className="px-6 sm:px-8 pt-6 pb-5 border-b border-slate-100 bg-gradient-to-b from-slate-50/80 to-white flex items-start justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-800 border border-blue-200/80">
+                      Ticket #{ticketNumberOf(selectedSaleDetail.id)}
+                    </span>
+                  </div>
+                  <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">Detalle de Venta</h1>
+                  <p className="text-xs sm:text-sm text-slate-500 flex items-center gap-2">
+                    <Calendar className="w-3.5 h-3.5" />
+                    <span>{new Date(selectedSaleDetail.date).toLocaleDateString('es-PE')}</span>
+                    <span className="text-slate-300">•</span>
+                    <span>{new Date(selectedSaleDetail.date).toLocaleTimeString('es-PE', { hour: 'numeric', minute: '2-digit', hour12: true })}</span>
+                  </p>
                 </div>
-                <div>
-                  <p className="text-sm text-gray-600">Método de pago</p>
-                  <Badge variant="outline" className={getPaymentMethodColor(selectedSaleDetail.paymentMethod)}>
-                    {selectedSaleDetail.paymentMethod}
-                  </Badge>
-                </div>
+                <button onClick={() => setIsDetailOpen(false)} className="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-2 rounded-full transition">
+                  <X className="w-5 h-5" />
+                </button>
+              </header>
+              <div className="px-6 sm:px-8 py-5 overflow-y-auto space-y-5">
+                <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-slate-50/90 rounded-2xl p-3 border border-slate-100">
+                    <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider block mb-1">Método Pago</span>
+                    <Badge className={getPaymentMethodColor(selectedSaleDetail.paymentMethod)}>{selectedSaleDetail.paymentMethod}</Badge>
+                  </div>
+                  <div className="bg-slate-50/90 rounded-2xl p-3 border border-slate-100">
+                    <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider block mb-1">Atendido por</span>
+                    <p className="text-xs font-semibold text-slate-700">
+                      {users.find(u => u.id === selectedSaleDetail.userId)?.name || 'Caja'}
+                    </p>
+                  </div>
+                  <div className="bg-slate-50/90 rounded-2xl p-3 border border-slate-100">
+                    <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider block mb-1">Importe Cobrado</span>
+                    <p className="text-sm font-bold text-slate-900">S/ {selectedSaleDetail.total.toFixed(2)}</p>
+                  </div>
+                  {userRole === 'admin' && (
+                    <div className="bg-emerald-50/80 rounded-2xl p-3 border border-emerald-100">
+                      <span className="text-[11px] font-semibold text-emerald-800 uppercase tracking-wider block mb-1">Ganancia Neta</span>
+                      <p className="text-sm font-bold text-emerald-600">+ S/ {selectedSaleDetail.totalProfit.toFixed(2)}</p>
+                    </div>
+                  )}
+                </section>
 
-                <div>
-                  <p className="text-sm text-gray-600">ID</p>
-                  <p className="font-medium font-mono text-slate-700">{selectedSaleDetail.id}</p>
-                </div>
-              </div>
-
-              <Separator />
-
-              <div>
-                <h4 className="font-medium mb-3">PRODUCTOS VENDIDOS</h4>
-                <div className="space-y-3">
-                  {selectedSaleDetail.items.map((item, index) => {
+                <section className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xs font-bold tracking-wider text-slate-400 uppercase">Productos Vendidos ({selectedSaleDetail.items.length})</h2>
+                  </div>
+                  <div className="space-y-3">
+                    {selectedSaleDetail.items.map((item, index) => {
                       const isMayoristaItem = item.product.type === 'mayorista' || (!!item.selectedLevelName && item.selectedLevelName !== 'Unidad');
-                      const itemTotal = (() => {
+                      const itemTotal = item.totalLinea ?? (
+                        isMayoristaItem || item.product.type === 'unidad' ? (item.product.salePrice || 0) * item.quantity : item.product.type === 'peso' ? (item.product.salePricePerKg || 0) * (item.quantity / 1000) : item.product.type === 'metro' ? (item.product.salePrice || 0) * (item.quantity / 100) : (item.product.salePrice || 0) * item.quantity
+                      );
+                      const getItemProfit = () => {
                         if (item.product.type === 'peso') {
-                          return (item.product.salePricePerKg || 0) * (item.quantity / 1000);
-                        } else if (isMayoristaItem) {
-                          return (item.product.salePrice || 0) * item.quantity;
-                        } else {
-                          return (item.product.salePrice || 0) * item.quantity;
+                          const totalKg = item.quantity / 1000;
+                          const profitPerKg = (item.product.salePricePerKg || 0) - (item.product.purchasePricePerKg || 0);
+                          return profitPerKg * totalKg;
                         }
-                      })();
-
-                    const getItemProfit = () => {
-                      if (item.product.type === 'peso') {
-                        const totalKg = item.quantity / 1000;
-                        const profitPerKg = (item.product.salePricePerKg || 0) - (item.product.purchasePricePerKg || 0);
-                        return profitPerKg * totalKg;
-                      } else if (isMayoristaItem) {
+                        if (item.product.type === 'metro') {
+                          return ((item.product.salePrice || 0) - (item.product.purchasePrice || 0)) * (item.quantity / 100);
+                        }
                         return ((item.product.salePrice || 0) - (item.product.purchasePrice || 0)) * item.quantity;
-                      } else {
-                        return ((item.product.salePrice || 0) - (item.product.purchasePrice || 0)) * item.quantity;
-                      }
-                    };
-                    const itemProfit = getItemProfit();
-                    const typeKey = isMayoristaItem ? 'mayorista' : item.product.type === 'peso' ? 'peso' : !item.selectedLevelName ? 'unidad-simple' : 'unidad';
-                    const palette = {
-                      mayorista: { header: 'bg-pink-100 text-pink-900', badge: 'bg-pink-200 text-pink-800 border-pink-300', total: 'bg-pink-600', border: 'border-pink-200' },
-                      peso: { header: 'bg-amber-100 text-amber-900', badge: 'bg-amber-200 text-amber-800 border-amber-300', total: 'bg-amber-600', border: 'border-amber-200' },
-                      'unidad-simple': { header: 'bg-teal-100 text-teal-900', badge: 'bg-teal-200 text-teal-800 border-teal-300', total: 'bg-teal-600', border: 'border-teal-200' },
-                      unidad: { header: 'bg-blue-100 text-blue-900', badge: 'bg-blue-200 text-blue-800 border-blue-300', total: 'bg-blue-600', border: 'border-blue-200' }
-                    }[typeKey];
+                      };
+                      const itemProfit = getItemProfit();
+                      const typeKey = isMayoristaItem ? 'mayorista' : item.product.type === 'peso' ? 'peso' : item.product.type === 'metro' ? 'metro' : !item.selectedLevelName ? 'unidad-simple' : 'unidad';
+                      const palette = {
+                        mayorista: { header: 'bg-pink-50 border-pink-100', badge: 'bg-pink-100 text-pink-700', total: 'bg-pink-600' },
+                        peso: { header: 'bg-amber-50 border-amber-100', badge: 'bg-amber-100 text-amber-700', total: 'bg-amber-600' },
+                        metro: { header: 'bg-cyan-50 border-cyan-100', badge: 'bg-cyan-100 text-cyan-700', total: 'bg-cyan-600' },
+                        'unidad-simple': { header: 'bg-teal-50 border-teal-100', badge: 'bg-teal-100 text-teal-700', total: 'bg-teal-600' },
+                        unidad: { header: 'bg-blue-50 border-blue-100', badge: 'bg-blue-100 text-blue-700', total: 'bg-blue-600' }
+                      }[typeKey];
 
-                    return (
-                      <div key={index} className={`rounded-lg border ${palette.border} bg-white overflow-hidden shadow-sm`}>
-                          <div className={`flex justify-between items-center px-4 py-3 ${palette.header}`}>
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="font-bold text-gray-900 truncate">{item.product.name}</span>
-                            <Badge variant="secondary" className={`text-[10px] ${palette.badge}`}>
-                              {isMayoristaItem ? 'Mayorista' : item.product.type === 'peso' ? 'Peso' : !item.selectedLevelName ? 'Unidad Simple' : 'Unidad'}
-                            </Badge>
-                          </div>
-                          <div className={`${palette.total} px-3 py-1 rounded-lg flex-shrink-0`}>
-                            <p className="font-semibold text-lg text-white">
-                              Total: S/ {itemTotal.toFixed(2)}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="p-4">
-                          {isMayoristaItem ? (
-                            <div className="flex gap-4">
-                              {(products.find(p => p.id === item.product.id)?.imageUrl) && (
-                                <img src={products.find(p => p.id === item.product.id)?.imageUrl} alt={item.product.name} className="w-28 h-28 object-cover rounded-lg border flex-shrink-0" />
-                              )}
-                              <div className="grid grid-cols-2 gap-x-6 gap-y-2 flex-1">
-                                <div>
-                                  <p className="text-sm text-gray-600 mb-1">Nivel vendido</p>
-                                  <p className="font-medium text-gray-900">{item.selectedLevelName}</p>
-                                </div>
-                                <div>
-                                  <p className="text-sm text-gray-600 mb-1">Cantidad</p>
-                                  <p className="font-medium">{item.quantity} {item.selectedLevelName?.toLowerCase()}{item.quantity !== 1 ? 's' : ''}</p>
-                                </div>
-                                {isMayoristaItem && (
-                                  <div>
-                                    <p className="text-sm text-gray-600 mb-1">P. Compra</p>
-                                    <p className="font-medium text-gray-900">S/ {(item.product.purchasePrice || 0).toFixed(2)}</p>
-                                  </div>
-                                )}
-                                <div>
-                                  <p className="text-sm text-gray-600 mb-1">P. Venta</p>
-                                  <p className="font-medium text-green-700">S/ {(item.product.salePrice || 0).toFixed(2)}</p>
-                                </div>
+                      return (
+                        <article key={index} className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-xs">
+                          <div className={`p-3.5 border-b flex items-center justify-between gap-3 ${palette.header}`}>
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div className="w-8 h-8 rounded-lg bg-white/70 flex items-center justify-center">
+                                <Package className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <h3 className="text-sm font-bold text-slate-800 truncate">{item.product.name}</h3>
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${palette.badge}`}>
+                                  {isMayoristaItem ? 'Mayorista' : item.product.type === 'peso' ? 'Peso' : item.product.type === 'metro' ? 'Metro' : !item.selectedLevelName ? 'Unidad Simple' : 'Unidad'}
+                                </span>
                               </div>
                             </div>
-                          ) : (
-                            <div className="flex gap-4 items-center">
-                              {(products.find(p => p.id === item.product.id)?.imageUrl) && (
-                                <img src={products.find(p => p.id === item.product.id)?.imageUrl} alt={item.product.name} className="w-32 h-32 object-cover rounded-lg border flex-shrink-0" />
-                              )}
-                              <div className="grid grid-cols-2 gap-x-6 gap-y-2 flex-1">
-                                <div>
-                                  <p className="text-sm text-gray-600 mb-1">Cantidad</p>
-                                  <p className="font-bold text-lg text-gray-900">
-                                    {item.product.type === 'peso' ? formatWeight(item.quantity) : `${item.quantity} ${item.product.baseUnit || 'unid.'}`}
-                                  </p>
-                                </div>
-                                {userRole === 'admin' && (
-                                  <div>
-                                    <p className="text-sm text-gray-600 mb-1">P. Compra</p>
-                                    <p className="font-medium text-gray-900">
-                                      S/ {(item.product.purchasePrice || 0).toFixed(2)}
-                                    </p>
-                                  </div>
-                                )}
-                                <div>
-                                  <p className="text-sm text-gray-600 mb-1">P. Venta</p>
-                                  <p className="font-medium text-green-700">
-                                    {item.product.type === 'peso'
-                                      ? `S/ ${((item.product.salePricePerKg || 0) / 1000).toFixed(3)}`
-                                      : `S/ ${(item.product.salePrice || 0).toFixed(2)}`}
-                                  </p>
-                                </div>
+                            <div className={`${palette.total} text-white px-3 py-1 rounded-xl text-xs font-bold`}>
+                              Total: S/ {itemTotal.toFixed(2)}
+                            </div>
+                          </div>
+                          <div className="p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
+                            {isMayoristaItem && (
+                              <div>
+                                <span className="text-xs font-medium text-slate-400 block mb-0.5">Nivel vendido</span>
+                                <p className="text-sm font-semibold text-slate-900">{item.selectedLevelName || '-'}</p>
                               </div>
+                            )}
+                            <div>
+                              <span className="text-xs font-medium text-slate-400 block mb-0.5">Cantidad</span>
+                              <p className="text-sm font-semibold text-slate-900">
+                                {item.product.type === 'peso' ? formatWeight(item.quantity) : item.product.type === 'metro' ? formatLength(item.quantity) : `${item.quantity} ${item.selectedLevelName === 'Unidad' ? 'und' : item.selectedLevelName?.toLowerCase() || item.product.baseUnit || 'unid.'}`}
+                              </p>
+                            </div>
+                            {userRole === 'admin' && (
+                              <div>
+                                <span className="text-xs font-medium text-slate-400 block mb-0.5">P. Compra</span>
+                                <p className="text-sm font-semibold text-slate-700">S/ {(item.product.purchasePrice || 0).toFixed(2)}{item.product.type === 'metro' ? '/m' : ''}</p>
+                              </div>
+                            )}
+                            <div>
+                              <span className="text-xs font-medium text-slate-400 block mb-0.5">P. Venta</span>
+                              <p className="text-sm font-semibold text-emerald-600">
+                                {item.product.type === 'peso' ? `S/ ${((item.product.salePricePerKg || 0)).toFixed(2)}/kg` : item.product.type === 'metro' ? `S/ ${(item.product.salePrice || 0).toFixed(2)}/m` : `S/ ${(item.product.salePrice || 0).toFixed(2)}`}
+                              </p>
+                            </div>
+                          </div>
+                          {userRole === 'admin' && (
+                            <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-100 flex items-center justify-between text-xs">
+                              <span className="text-slate-500">Rentabilidad estimada</span>
+                              <span className="inline-flex items-center gap-1.5 bg-emerald-100/80 text-emerald-800 font-semibold px-2.5 py-0.5 rounded-lg">Ganancia: S/ {itemProfit.toFixed(2)}</span>
                             </div>
                           )}
-                        </div>
-                        {userRole === 'admin' && (
-                          <div className="flex items-center justify-between px-4 py-3 bg-gray-100 border-t border-gray-200">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <CheckCircle2 className="w-4 h-4 text-gray-500 flex-shrink-0" />
-                              <span className="font-medium text-sm text-gray-500 truncate">{item.product.name}</span>
-                            </div>
-                            <Badge variant="secondary" className="bg-green-100 text-green-800 border-green-300 flex-shrink-0">
-                              Ganancia: S/ {itemProfit.toFixed(2)}
-                            </Badge>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <Separator />
-
-              <div className="space-y-3">
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-600">Subtotal:</span>
-                  <span className="font-medium">S/ {selectedSaleDetail.subtotal.toFixed(2)}</span>
-                </div>
-
-                <Separator />
-                <div className="flex justify-between text-xl font-bold text-yellow-600 bg-yellow-50 p-3 rounded-lg">
-                  <span>Total:</span>
-                  <span>S/ {selectedSaleDetail.total.toFixed(2)}</span>
-                </div>
-                {userRole === 'admin' && (
-                  <div className="flex justify-between text-lg font-semibold text-green-700 pt-2 border-t border-green-200">
-                    <span>Ganancia Total:</span>
-                    <span>S/ {selectedSaleDetail.totalProfit.toFixed(2)}</span>
+                        </article>
+                      );
+                    })}
                   </div>
-                )}
-                {selectedSaleDetail.paymentMethod === 'efectivo' && (
-                  <>
-                    <div className="flex justify-between text-sm font-medium">
-                      <span className="text-gray-600">Monto Recibido:</span>
-                      <span>S/ {selectedSaleDetail.amountPaid?.toFixed(2) || '0.00'}</span>
+                </section>
+
+                <section className="bg-slate-50/70 rounded-2xl p-4 border border-slate-100 space-y-2">
+                  <div className="flex justify-between text-xs sm:text-sm text-slate-600">
+                    <span>Subtotal</span>
+                    <span className="font-medium text-slate-800">S/ {selectedSaleDetail.subtotal.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-xs sm:text-sm text-slate-600">
+                    <span>IGV (18%)</span>
+                    <span className="font-medium text-slate-800">S/ {selectedSaleDetail.igv?.toFixed(2) || '0.00'}</span>
+                  </div>
+                  <div className="h-px bg-slate-200"></div>
+                  <div className="bg-amber-50/90 border border-amber-200/70 rounded-xl p-3 flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold text-amber-800 uppercase tracking-wide">Total Cancelado</span>
+                      <span className="text-[11px] text-amber-700/80 block">Pagado con {selectedSaleDetail.paymentMethod}</span>
                     </div>
-                    <div className="flex justify-between text-lg font-bold">
-                      <span>Cambio:</span>
-                      <span>S/ {selectedSaleDetail.change?.toFixed(2) || '0.00'}</span>
+                    <span className="text-2xl font-extrabold text-amber-600">S/ {selectedSaleDetail.total.toFixed(2)}</span>
+                  </div>
+                  {userRole === 'admin' && (
+                    <div className="flex justify-between items-center text-sm pt-1">
+                      <span className="text-slate-600">Ganancia Total</span>
+                      <span className="font-semibold text-emerald-600">S/ {selectedSaleDetail.totalProfit.toFixed(2)}</span>
                     </div>
-                  </>
-                )}
+                  )}
+                  {selectedSaleDetail.paymentMethod === 'efectivo' && (
+                    <div className="space-y-1 pt-1">
+                      <div className="flex justify-between text-xs text-slate-600">
+                        <span>Monto Recibido</span>
+                        <span>S/ {selectedSaleDetail.amountPaid?.toFixed(2) || '0.00'}</span>
+                      </div>
+                      <div className="flex justify-between text-xs text-slate-600">
+                        <span>Cambio</span>
+                        <span>S/ {selectedSaleDetail.change?.toFixed(2) || '0.00'}</span>
+                      </div>
+                    </div>
+                  )}
+                </section>
               </div>
             </div>
           )}
@@ -6057,23 +7907,25 @@ const Index = () => {
                         if (!item.product || !item.product.name) return;
                         
                         if (item.product.type === 'mayorista' || (item.product.type === 'unidad' && item.selectedLevelName)) {
-                          if (item.selectedLevelName) {
-                            const lKey = `${item.product.name}|${item.selectedLevelName}`;
-                            if (!levelSummary[lKey]) {
-                              levelSummary[lKey] = {
-                                productName: item.product.name,
-                                levelName: item.selectedLevelName,
-                                quantity: 0,
-                                salePrice: item.product.salePrice || 0,
-                                purchasePrice: item.product.purchasePrice || 0,
-                                total: 0,
-                                profit: 0
-                              };
-                            }
-                            levelSummary[lKey].quantity += item.quantity || 0;
-                            levelSummary[lKey].total += (item.product.salePrice || 0) * (item.quantity || 0);
-                            levelSummary[lKey].profit += ((item.product.salePrice || 0) - (item.product.purchasePrice || 0)) * (item.quantity || 0);
+                          // Si la venta vieja no guardo el nivel (nivel_id nulo), se
+                          // agrupa igual como "Mayorista" para que el resumen no quede vacio.
+                          const nivelTexto = item.selectedLevelName
+                            || (item.levelId ? `Nivel ${item.levelId}` : 'Mayorista');
+                          const lKey = `${item.product.name}|${nivelTexto}`;
+                          if (!levelSummary[lKey]) {
+                            levelSummary[lKey] = {
+                              productName: item.product.name,
+                              levelName: nivelTexto,
+                              quantity: 0,
+                              salePrice: item.product.salePrice || 0,
+                              purchasePrice: item.product.purchasePrice || 0,
+                              total: 0,
+                              profit: 0
+                            };
                           }
+                          levelSummary[lKey].quantity += item.quantity || 0;
+                          levelSummary[lKey].total += (item.product.salePrice || 0) * (item.quantity || 0);
+                          levelSummary[lKey].profit += ((item.product.salePrice || 0) - (item.product.purchasePrice || 0)) * (item.quantity || 0);
                           if (item.product.type === 'mayorista' || item.selectedLevelName !== 'Unidad') return;
                         }
                         
@@ -6097,6 +7949,11 @@ const Index = () => {
                           productSummary[item.product.name].quantity += item.quantity || 0;
                           productSummary[item.product.name].total += (item.product.salePricePerKg || 0) * totalKg;
                           productSummary[item.product.name].profit += profitPerKg * totalKg;
+                        } else if (item.product.type === 'metro') {
+                          const totalMeters = (item.quantity || 0) / 100;
+                          productSummary[item.product.name].quantity += item.quantity || 0;
+                          productSummary[item.product.name].total += (item.product.salePrice || 0) * totalMeters;
+                          productSummary[item.product.name].profit += ((item.product.salePrice || 0) - (item.product.purchasePrice || 0)) * totalMeters;
                         } else {
                           productSummary[item.product.name].quantity += item.quantity || 0;
                           productSummary[item.product.name].total += (item.product.salePrice || 0) * (item.quantity || 0);
@@ -6118,7 +7975,7 @@ const Index = () => {
                     const hasRegular = filteredRegularEntries.length > 0;
                     const hasMayorista = filteredLevelEntries.length > 0;
 
-                    const activeTab: 'regular' | 'mayorista' = !hasRegular ? 'mayorista' : !hasMayorista ? 'regular' : resumenTab;
+                    const activeTab: 'regular' | 'mayorista' = resumenTab;
                     const showSelector = true;
 
                     return (
@@ -6132,7 +7989,7 @@ const Index = () => {
                                 onClick={() => setResumenTab('regular')}
                                 className={`h-8 rounded-lg text-xs font-bold uppercase tracking-widest ${activeTab === 'regular' ? 'bg-slate-700 text-white hover:bg-slate-800 shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}
                               >
-                                Unidad / Peso
+                                Unidad / Peso / Metro
                               </Button>
                               <Button
                                 variant={activeTab === 'mayorista' ? 'secondary' : 'ghost'}
@@ -6195,15 +8052,17 @@ const Index = () => {
                                       </div>
                                     </TableCell>
                                     <TableCell className="text-center font-semibold border-r">
-                                      {product?.type === 'peso' ? formatWeight(data.currentStock) : data.currentStock}
+                                      {product?.type === 'peso' ? formatWeight(data.currentStock) : product?.type === 'metro' ? formatLength(data.currentStock) : data.currentStock}
                                     </TableCell>
                                     <TableCell className="text-center font-semibold text-amber-600 border-r">
-                                      {product?.type === 'peso' ? formatWeight(data.quantity) : data.type === 'unidad' ? `${data.quantity} unid` : data.quantity}
+                                      {product?.type === 'peso' ? formatWeight(data.quantity) : product?.type === 'metro' ? formatLength(data.quantity) : data.type === 'unidad' ? `${data.quantity} unid` : data.quantity}
                                     </TableCell>
                                     <TableCell className="text-center border-r">
                                       {product?.type === 'peso'
                                         ? `S/ ${(product.salePricePerKg || 0).toFixed(2)}/kg`
-                                        : `S/ ${(data.salePrice || 0).toFixed(2)}`}
+                                        : product?.type === 'metro'
+                                          ? `S/ ${(data.salePrice || 0).toFixed(2)}/m`
+                                          : `S/ ${(data.salePrice || 0).toFixed(2)}`}
                                     </TableCell>
                                     <TableCell className="text-right font-bold text-green-600 border-r">
                                       S/ {(data.total || 0).toFixed(2)}
@@ -6211,7 +8070,7 @@ const Index = () => {
                                     {userRole === 'admin' && (
                                       <>
                                         <TableCell className="text-center border-r">
-                                          S/ {(data.purchasePrice || 0).toFixed(2)}
+                                          S/ {(data.purchasePrice || 0).toFixed(2)}{product?.type === 'metro' ? '/m' : ''}
                                         </TableCell>
                                         <TableCell className="text-right font-bold text-purple-600">
                                           S/ {Math.max(0, data.profit).toFixed(2)}
@@ -6294,6 +8153,12 @@ const Index = () => {
                               </TableBody>
                             </Table>
                           </div>
+                        )}
+                        {activeTab === 'regular' && filteredRegularEntries.length === 0 && (
+                          <div className="text-center py-6 text-gray-500">No hay ventas de unidad / peso / metro con ese filtro</div>
+                        )}
+                        {activeTab === 'mayorista' && filteredLevelEntries.length === 0 && (
+                          <div className="text-center py-6 text-gray-500">No hay ventas por mayor con ese filtro</div>
                         )}
                           </>
                         )}
@@ -6412,6 +8277,7 @@ const Index = () => {
                       const hasUnidadSimple = sale.items.some(item => item.product.type === 'unidad' && !item.selectedLevelName);
                       const hasMayorista = sale.items.some(item => item.product.type === 'mayorista' || (item.selectedLevelName && item.selectedLevelName !== 'Unidad'));
                       const hasPeso = sale.items.some(item => item.product.type === 'peso');
+                      const hasMetro = sale.items.some(item => item.product.type === 'metro');
                       return (
                       <Card key={sale.id} className={`mb-3 cursor-pointer hover:shadow-md transition-shadow ${sale.paymentMethod === 'efectivo' ? 'border-l-4 border-l-green-500 bg-gradient-to-r from-green-50/50 to-white' : sale.paymentMethod === 'yape' ? 'border-l-4 border-l-purple-500 bg-gradient-to-r from-purple-50/50 to-white' : sale.paymentMethod === 'plin' ? 'border-l-4 border-l-sky-500 bg-gradient-to-r from-sky-50/50 to-white' : sale.paymentMethod === 'tarjeta' ? 'border-l-4 border-l-orange-500 bg-gradient-to-r from-orange-50/50 to-white' : ''}`} onClick={() => {
                         setSelectedSaleDetail(sale);
@@ -6423,7 +8289,7 @@ const Index = () => {
                               <Clock className="w-4 h-4 text-gray-500" />
                               <span className="font-medium">{new Date(sale.date).toLocaleTimeString('es-ES', { hour12: true, hour: '2-digit', minute: '2-digit' })}</span>
                               <Badge variant="outline" className="bg-gray-50 text-gray-700">
-                                {sale.id}
+                                #{ticketNumberOf(sale.id)}
                               </Badge>
                               {hasUnidad && (
                                 <Badge className="bg-blue-100 text-blue-700 border-blue-200 text-[10px]">
@@ -6445,6 +8311,11 @@ const Index = () => {
                                   Peso
                                 </Badge>
                               )}
+                              {hasMetro && (
+                                <Badge className="bg-cyan-100 text-cyan-700 border-cyan-200 text-[10px]">
+                                  Metro
+                                </Badge>
+                              )}
                             </div>
                             <div className="flex items-center space-x-2">
                               <Badge variant="outline" className={getPaymentMethodColor(sale.paymentMethod)}>
@@ -6460,11 +8331,8 @@ const Index = () => {
                             </div>
                           </div>
                           <div className="flex gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
-                            <Button size="sm" variant="ghost" className="h-7 text-indigo-600 text-[10px]" onClick={() => viewBoleta(sale)}>
-                              📋 Boleta
-                            </Button>
-                            <Button size="sm" variant="ghost" className="h-7 text-blue-600 text-[10px]" onClick={() => reimprimirBoleta(sale)}>
-                              🖨 Imprimir
+                            <Button size="sm" variant="ghost" className="h-7 text-slate-600 text-[10px]" onClick={() => viewBoleta(sale)}>
+                              📋 Ticket
                             </Button>
                           </div>
                         </CardContent>
@@ -6627,7 +8495,6 @@ const Index = () => {
         </DialogContent>
       </Dialog><Dialog open={isEditUserOpen} onOpenChange={(open) => {
         setIsEditUserOpen(open);
-        if (!open) setShowEditUserPassword(false);
       }}>
         <DialogContent>
           <DialogHeader>
@@ -6648,26 +8515,24 @@ const Index = () => {
                   disabled
                   value={editingUser.email} />
               </div>
-              <div>
-                <Label>¿Olvidaste tu contraseña? Realiza una nueva aquí</Label>
-                <p className="text-xs text-slate-400 mb-1">Déjala vacía para mantener la actual</p>
-                <div className="relative">
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-3">
+                <p className="text-xs font-semibold text-slate-700">Cambiar contraseña</p>
+                <div className="flex gap-2">
                   <Input
-                    type={showEditUserPassword ? "text" : "password"}
-                    value={editingUser.password}
-                    onChange={(e) => setEditingUser({ ...editingUser, password: e.target.value })}
-                    className="pr-10"
+                    type="text"
+                    placeholder="Nueva contraseña (mín. 6)"
+                    value={editUserPassword}
+                    onChange={(e) => setEditUserPassword(e.target.value)}
+                    className="h-9 text-xs"
+                    autoComplete="new-password"
                   />
                   <Button
                     type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-slate-500 hover:text-slate-900"
-                    onClick={() => setShowEditUserPassword(prev => !prev)}
-                    aria-label={showEditUserPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-                    aria-pressed={showEditUserPassword}
+                    className="h-9 text-xs shrink-0"
+                    disabled={isChangingUserPassword}
+                    onClick={definirPasswordUsuario}
                   >
-                    {showEditUserPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    {isChangingUserPassword ? 'Guardando…' : 'Definir'}
                   </Button>
                 </div>
               </div>
@@ -6684,6 +8549,35 @@ const Index = () => {
                 </Select>
               </div>
               <Button onClick={guardarEdicionUsuario} className="w-full">Guardar Cambios</Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+      <Dialog open={usuarioAEliminar !== null} onOpenChange={(open) => { if (!open) setUsuarioAEliminar(null); }}>
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle className="text-red-600">Eliminar al Empleado</DialogTitle>
+          </DialogHeader>
+          {usuarioAEliminar && (
+            <div className="space-y-4">
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <p className="text-sm font-semibold text-red-800">{usuarioAEliminar.name}</p>
+                <p className="text-sm text-red-700">{usuarioAEliminar.email}</p>
+              </div>
+              <p className="text-sm text-slate-500 leading-relaxed">
+                El empleado quedará <span className="font-semibold text-slate-700">bloqueado y dejará de ver el sistema</span>.
+                Para quitarle el acceso por completo, bórralo también en
+                <span className="font-semibold text-slate-700"> Supabase → Authentication → Users</span>.
+              </p>
+              <div className="flex gap-3 justify-end">
+                <Button variant="outline" onClick={() => setUsuarioAEliminar(null)}>Cancelar</Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => eliminarUsuario(usuarioAEliminar.id)}
+                >
+                  Eliminar
+                </Button>
+              </div>
             </div>
           )}
         </DialogContent>
@@ -6937,6 +8831,201 @@ const Index = () => {
               </div>
               
               <Button onClick={handleAddWeightToCart} className="w-full bg-green-600 hover:bg-green-700">
+                Agregar al Carrito
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Modal para agregar metro */}
+      <Dialog open={isMetroModalOpen} onOpenChange={setIsMetroModalOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Agregar Metro</DialogTitle>
+          </DialogHeader>
+          {selectedMetroProduct && (
+            <div className="space-y-4">
+              {selectedMetroProduct.imageUrl ? (
+                <div className="rounded-lg overflow-hidden border bg-slate-50 flex items-center justify-center">
+                  <img src={selectedMetroProduct.imageUrl} alt={selectedMetroProduct.name} className="w-full h-40 object-contain" />
+                </div>
+              ) : (
+                <div className="rounded-lg h-24 bg-slate-100 border flex items-center justify-center">
+                  <Package className="w-10 h-10 text-slate-300" />
+                </div>
+              )}
+              <div className="flex items-center justify-between bg-slate-50 rounded-lg p-3 border">
+                <div>
+                  <h3 className="font-bold text-base">{selectedMetroProduct.name}</h3>
+                  <p className="text-xs text-gray-500">Stock: {formatLength(selectedMetroProduct.stock)}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-green-600 font-bold text-sm">S/ {((selectedMetroProduct.salePrice || 0) / 100).toFixed(3)} / cm</p>
+                  <p className="text-blue-600 font-bold text-xs">S/ {(selectedMetroProduct.salePrice || 0).toFixed(2)} / m</p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { centimeters: 25, label: "25 cm", meterLabel: "1/4 m" },
+                    { centimeters: 50, label: "50 cm", meterLabel: "1/2 m" },
+                    { centimeters: 100, label: "100 cm", meterLabel: "1 m" }
+                  ].map((item) => (
+                    <div key={item.centimeters} className="text-center">
+                      <p className="text-xs font-bold text-gray-700 mb-1">{item.meterLabel}</p>
+                      <Button
+                        variant="outline"
+                        className="w-full mb-2 text-xs"
+                        onClick={() => handleMetroQuantityChange(item.centimeters, (metroQuantities[item.centimeters.toString()] || 0) + 1)}
+                      >
+                        {item.label}
+                      </Button>
+                      <div className="flex items-center justify-center space-x-1">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleMetroQuantityChange(item.centimeters, Math.max(0, (metroQuantities[item.centimeters.toString()] || 0) - 1))}
+                        >
+                          -
+                        </Button>
+                        <span className="text-sm font-medium">{metroQuantities[item.centimeters.toString()] || 0}</span>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => handleMetroQuantityChange(item.centimeters, 0)}
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <Label htmlFor={metroInputMode === 'meters' ? 'customMeters' : 'customMetroMoney'}>
+                      {metroInputMode === 'meters' ? 'O ingresa metros manualmente' : 'O ingresa valor de la venta'}
+                    </Label>
+                    <div className="flex space-x-1 bg-slate-100 p-0.5 rounded-md border text-xs">
+                      <Button
+                        type="button"
+                        variant={metroInputMode === 'meters' ? 'default' : 'ghost'}
+                        className={`h-6 px-2 text-[10px] rounded-sm font-semibold ${metroInputMode === 'meters' ? 'bg-blue-600 text-white hover:bg-blue-700' : 'text-gray-600 hover:bg-gray-200'}`}
+                        onClick={() => {
+                          setMetroInputMode('meters');
+                          setCustomMetroMoney('');
+                        }}
+                      >
+                        En Metros
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={metroInputMode === 'money' ? 'default' : 'ghost'}
+                        className={`h-6 px-2 text-[10px] rounded-sm font-semibold ${metroInputMode === 'money' ? 'bg-blue-600 text-white hover:bg-blue-700' : 'text-gray-600 hover:bg-gray-200'}`}
+                        onClick={() => {
+                          setMetroInputMode('money');
+                          setCustomMeters('');
+                        }}
+                      >
+                        En Soles
+                      </Button>
+                    </div>
+                  </div>
+
+                  {metroInputMode === 'meters' ? (
+                    <Input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="ej. 2.50 metros"
+                      id="customMeters"
+                      value={customMeters}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (value === '' || /^\d*(?:[.,]\d{0,2})?$/.test(value)) {
+                          setCustomMeters(value);
+                        }
+                      }}
+                    />
+                  ) : (
+                    <div className="space-y-1.5">
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-semibold text-sm">S/</span>
+                        <Input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="ej. 5.00"
+                          id="customMetroMoney"
+                          className="pl-8"
+                          value={customMetroMoney}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            if (value === '' || /^\d*(?:[.,]\d{0,2})?$/.test(value)) {
+                              setCustomMetroMoney(value);
+                            }
+                          }}
+                        />
+                      </div>
+                      {customMetroMoney && parseFloat(normalizeDecimalInput(customMetroMoney)) > 0 && (
+                        <p className="text-xs text-blue-600 font-semibold mt-1">
+                          Equivale a: {(() => {
+                            const pricePerMeter = selectedMetroProduct.salePrice || 0;
+                            const money = parseFloat(normalizeDecimalInput(customMetroMoney)) || 0;
+                            const cm = pricePerMeter > 0 ? Math.round((money / pricePerMeter) * 100) : 0;
+                            return formatLength(cm);
+                          })()}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-gray-50 p-3 rounded-lg">
+                  <div className="flex justify-between">
+                    <span>Longitud Total:</span>
+                    <span className="font-bold">
+                      {(() => {
+                        let total = 0;
+                        Object.entries(metroQuantities).forEach(([centimeters, quantity]) => {
+                          total += Number(centimeters) * quantity;
+                        });
+                        if (metroInputMode === 'meters') {
+                          const meters = parseFloat(normalizeDecimalInput(customMeters)) || 0;
+                          if (meters > 0) total += Math.round(meters * 100);
+                        } else {
+                          const pricePerMeter = selectedMetroProduct.salePrice || 0;
+                          const money = parseFloat(normalizeDecimalInput(customMetroMoney)) || 0;
+                          if (money > 0 && pricePerMeter > 0) total += Math.round((money / pricePerMeter) * 100);
+                        }
+                        return formatLength(total);
+                      })()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Precio Total:</span>
+                    <span className="font-bold text-green-600">
+                      S/ {(() => {
+                        let totalCm = 0;
+                        Object.entries(metroQuantities).forEach(([centimeters, quantity]) => {
+                          totalCm += Number(centimeters) * quantity;
+                        });
+                        if (metroInputMode === 'meters') {
+                          const meters = parseFloat(normalizeDecimalInput(customMeters)) || 0;
+                          if (meters > 0) totalCm += Math.round(meters * 100);
+                        } else {
+                          const pricePerMeter = selectedMetroProduct.salePrice || 0;
+                          const money = parseFloat(normalizeDecimalInput(customMetroMoney)) || 0;
+                          if (money > 0 && pricePerMeter > 0) totalCm += Math.round((money / pricePerMeter) * 100);
+                        }
+                        return ((selectedMetroProduct.salePrice || 0) * (totalCm / 100)).toFixed(2);
+                      })()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <Button onClick={handleAddMetroToCart} className="w-full bg-green-600 hover:bg-green-700">
                 Agregar al Carrito
               </Button>
             </div>
@@ -7340,6 +9429,187 @@ const Index = () => {
                 </div>
               </div>
               <Button onClick={guardarEdicionProductoPeso} className="w-full bg-green-600 hover:bg-green-700">
+                Guardar Cambios
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Modal para editar producto por metro */}
+      <Dialog open={isEditMetroProductOpen} onOpenChange={setIsEditMetroProductOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Editar Producto por Metro</DialogTitle>
+          </DialogHeader>
+          {editingMetroProduct && (
+            <div className="space-y-4">
+              <div>
+                <Label>Nombre</Label>
+                <Input
+                  placeholder="Ej: Cable THW 12 AWG"
+                  value={editingMetroProduct.name}
+                  onChange={(e) => setEditingMetroProduct({ ...editingMetroProduct, name: e.target.value })}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label className="block min-h-[20px]">Precio de Compra por Metro</Label>
+                  <Input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={editMetroPurchaseInput}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      const normalized = raw.replace(',', '.');
+                      if (raw === '' || /^\d*(?:[.,]\d{0,2})?$/.test(raw)) {
+                        setEditMetroPurchaseInput(raw);
+                        const num = normalized === '' ? 0 : parseFloat(normalized) || 0;
+                        setEditingMetroProduct({ ...editingMetroProduct, purchasePrice: num });
+                      }
+                    }}
+                    onBlur={(e) => {
+                      const v = e.target.value.replace(',', '.');
+                      if (v !== '' && !isNaN(Number(v))) {
+                        const n = Math.round(parseFloat(v) * 100) / 100;
+                        setEditingMetroProduct({ ...editingMetroProduct, purchasePrice: n });
+                        setEditMetroPurchaseInput(n.toFixed(2));
+                      } else {
+                        setEditMetroPurchaseInput('');
+                      }
+                    }}
+                  />
+                </div>
+                <div>
+                  <Label className="block min-h-[20px]">Precio de Venta por Metro</Label>
+                  <Input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={editMetroSaleInput}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      const normalized = raw.replace(',', '.');
+                      if (raw === '' || /^\d*(?:[.,]\d{0,2})?$/.test(raw)) {
+                        setEditMetroSaleInput(raw);
+                        const num = normalized === '' ? 0 : parseFloat(normalized) || 0;
+                        setEditingMetroProduct({ ...editingMetroProduct, salePrice: num });
+                      }
+                    }}
+                    onBlur={(e) => {
+                      const v = e.target.value.replace(',', '.');
+                      if (v !== '' && !isNaN(Number(v))) {
+                        const n = Math.round(parseFloat(v) * 100) / 100;
+                        setEditingMetroProduct({ ...editingMetroProduct, salePrice: n });
+                        setEditMetroSaleInput(n.toFixed(2));
+                      } else {
+                        setEditMetroSaleInput('');
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+              <div className="text-sm text-green-600 font-medium">
+                Precio de Venta por Centímetro: S/ {((editingMetroProduct.salePrice || 0) / 100).toFixed(3)}
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                {(() => {
+                  const hasSales = stockHistory.some(h => h.productId === editingMetroProduct.id && h.type === 'sale');
+                  const stockCmPreview = Math.round((parseFloat(normalizeDecimalInput(editMetroStockInput)) || 0) * 100);
+                  return (
+                    <>
+                      <div>
+                        <Label>Stock actual (m)</Label>
+                        <Input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="0.00"
+                          value={editMetroStockInput}
+                          onChange={(e) => {
+                            if (hasSales) return;
+                            const raw = e.target.value;
+                            if (raw === '' || /^\d*(?:[.,]\d{0,2})?$/.test(raw)) {
+                              setEditMetroStockInput(raw);
+                            }
+                          }}
+                          onBlur={(e) => {
+                            if (hasSales) return;
+                            const v = e.target.value.replace(',', '.');
+                            if (v !== '' && !isNaN(Number(v))) {
+                              setEditMetroStockInput((Math.round(parseFloat(v) * 100) / 100).toFixed(2));
+                            } else {
+                              setEditMetroStockInput('');
+                            }
+                          }}
+                          className={hasSales ? 'opacity-60 cursor-not-allowed' : ''}
+                          disabled={hasSales}
+                        />
+                      </div>
+                      <div className="flex items-end">
+                        {hasSales ? (
+                          <p className="text-[10px] text-amber-600 font-medium w-full">⚠️ Stock bloqueado. Usa <strong>"Restock"</strong> en Historial.</p>
+                        ) : (
+                          <div className="p-2 bg-green-100 text-green-800 rounded-md text-center w-full">
+                            <p className="text-xs">Conversión</p>
+                            <p className="font-bold">{formatLength(stockCmPreview)}</p>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+              <div>
+                <Label>Categoría</Label>
+                <Input
+                  placeholder="Ej: cables"
+                  value={editingMetroProduct.category}
+                  onChange={(e) => setEditingMetroProduct({ ...editingMetroProduct, category: e.target.value })}
+                />
+              </div>
+              <Separator />
+              <div>
+                <Label>Imagen del producto</Label>
+                <Input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      setEditProductImage(file);
+                      const reader = new FileReader();
+                      reader.onloadend = () => setEditProductImagePreview(reader.result as string);
+                      reader.readAsDataURL(file);
+                    }
+                  }}
+                />
+                <div className="mt-3">
+                  {editProductImagePreview ? (
+                    <img src={editProductImagePreview} alt="Preview" className="w-full h-40 object-cover rounded-lg border" />
+                  ) : editingMetroProduct.imageUrl ? (
+                    <div className="relative">
+                      <img src={editingMetroProduct.imageUrl} alt={editingMetroProduct.name} className="w-full h-40 object-cover rounded-lg border" />
+                      <Button
+                        variant="destructive"
+                        size="icon"
+                        className="absolute top-2 right-2 h-6 w-6 rounded-full"
+                        onClick={() => {
+                          setEditingMetroProduct({ ...editingMetroProduct, imageUrl: undefined });
+                          setEditProductImagePreview('');
+                        }}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="w-full h-32 bg-slate-100 rounded-lg border flex items-center justify-center">
+                      <Package className="w-8 h-8 text-slate-300" />
+                    </div>
+                  )}
+                </div>
+              </div>
+              <Button onClick={guardarEdicionProductoMetro} className="w-full bg-green-600 hover:bg-green-700">
                 Guardar Cambios
               </Button>
             </div>
@@ -7758,37 +10028,12 @@ const Index = () => {
                 <div className="flex justify-between items-start">
                   <div>
                     <p className="font-medium text-red-900">{product.name}</p>
-                    <p className="text-sm text-red-700">Stock: {product.stock}</p>
+                    <p className="text-sm text-red-700">Stock: {product.type === 'metro' ? formatLength(product.stock) : product.stock}</p>
                     <p className="text-sm text-red-700">Categoría: {product.category}</p>
                   </div>
                 </div>
               </div>
             ))}
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="bulkDeletePassword">Contraseña de administrador</Label>
-            <div className="relative">
-              <Input
-                id="bulkDeletePassword"
-                type={showDeleteProductPassword ? 'text' : 'password'}
-                placeholder="Ingresa tu contraseña"
-                value={deleteProductPassword}
-                onChange={(e) => setDeleteProductPassword(e.target.value)}
-                autoFocus
-                autoComplete="off"
-                className="pr-10"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-slate-500 hover:text-slate-900"
-                onClick={() => setShowDeleteProductPassword(prev => !prev)}
-                tabIndex={-1}
-              >
-                {showDeleteProductPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </Button>
-            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsDeleteConfirmOpen(false)}>
@@ -7876,35 +10121,9 @@ const Index = () => {
               <span className="text-red-600 font-medium">
                 ⚠️ Esta acción NO se puede deshacer y eliminará completamente todos los datos de este cierre.
               </span>
-              <br /><br />
-              Para confirmar, ingresa la contraseña de administrador:
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div>
-              <Label htmlFor="adminPassword">Contraseña de Administrador</Label>
-              <div className="relative">
-                <Input
-                  id="adminPassword"
-                  type={showAdminPassword ? 'text' : 'password'}
-                  placeholder="Ingresa tu contraseña de administrador"
-                  value={adminPassword}
-                  onChange={(e) => setAdminPassword(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && confirmDeleteDailyClose()}
-                  className="pr-10"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-slate-500 hover:text-slate-900"
-                  onClick={() => setShowAdminPassword(prev => !prev)}
-                  tabIndex={-1}
-                >
-                  {showAdminPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </Button>
-              </div>
-            </div>
             {closeToDelete && (
               <div className="bg-red-50 p-4 rounded-lg border border-red-200">
                 <h4 className="font-medium text-red-900 mb-2">Resumen del cierre a eliminar:</h4>
@@ -7961,10 +10180,13 @@ const Index = () => {
             ];
             const hasUnidad = viewingMayoristaProduct.saleLevels?.some(l => l.name === 'Unidad');
             const unidadLevel = hasUnidad ? sortedLevels.find(l => l.name === 'Unidad') : null;
+            // Productos sin Unidad (paquete/millar/etc) usan el nuevo diseño con pestañas
+            const usarDisenoNuevo = !hasUnidad && sortedLevels.length > 0;
             return (
               <div className="space-y-8">
                 {/* Row 1: Image + Estado de Inventario card (hasUnidad) or full levels grid (!hasUnidad) */}
                 <div className="flex flex-col md:flex-row gap-8 items-start">
+                  {!usarDisenoNuevo && (
                   <div className="flex-shrink-0 flex flex-col items-center">
                     {viewingMayoristaProduct.imageUrl ? (
                       <img 
@@ -7978,6 +10200,7 @@ const Index = () => {
                       </div>
                     )}
                   </div>
+                  )}
                   <div className="flex-1 w-full">
                     {hasUnidad ? (
                       unidadLevel && (
@@ -7991,13 +10214,11 @@ const Index = () => {
                             <div className="grid grid-cols-2 gap-3 bg-white p-3 rounded-lg border border-slate-200">
                               <div className="space-y-1">
                                 <p className="text-xs font-semibold text-slate-500 uppercase">STOCK INICIAL</p>
-                                <p className="text-xl font-bold text-slate-900">{unidadLevel.initialStock}</p>
-                                <p className="text-[11px] text-slate-400 font-medium">→ {unidadLevel.initialStock} und</p>
+                                <p className="text-xl font-bold text-slate-900">{unidadLevel.initialStock} und</p>
                               </div>
                               <div className="space-y-1">
                                 <p className="text-xs font-semibold text-slate-500 uppercase">STOCK ACTUAL</p>
-                                <p className="text-xl font-bold text-blue-600">{unidadLevel.stock}</p>
-                                <p className="text-[11px] text-slate-400 font-medium">→ {unidadLevel.stock} und</p>
+                                <p className="text-xl font-bold text-blue-600">{unidadLevel.stock} und</p>
                               </div>
                             </div>
                           </div>
@@ -8014,146 +10235,34 @@ const Index = () => {
                           <div className="grid grid-cols-2 gap-3 bg-white p-3 rounded-lg border border-slate-200">
                             <div className="space-y-1">
                               <p className="text-xs font-semibold text-slate-500 uppercase">STOCK INICIAL</p>
-                              <p className="text-xl font-bold text-slate-900">{viewingMayoristaProduct.type === 'peso' ? formatWeight(viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) : `${viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock} und`}</p>
-                              <p className="text-[11px] text-slate-400 font-medium">{viewingMayoristaProduct.type === 'peso' ? `${((viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) / 1000).toFixed(2)} kg` : `→ ${viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock} und`}</p>
+                              <p className="text-xl font-bold text-slate-900">{viewingMayoristaProduct.type === 'peso' ? formatWeight(viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) : viewingMayoristaProduct.type === 'metro' ? formatLength(viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) : `${viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock} und`}</p>
                             </div>
                             <div className="space-y-1">
                               <p className="text-xs font-semibold text-slate-500 uppercase">STOCK ACTUAL</p>
-                              <p className="text-xl font-bold text-blue-600">{viewingMayoristaProduct.type === 'peso' ? formatWeight(viewingMayoristaProduct.stock) : `${viewingMayoristaProduct.stock} und`}</p>
-                              <p className="text-[11px] text-slate-400 font-medium">{viewingMayoristaProduct.type === 'peso' ? `${(viewingMayoristaProduct.stock / 1000).toFixed(2)} kg` : `→ ${viewingMayoristaProduct.stock} und`}</p>
+                              <p className="text-xl font-bold text-blue-600">{viewingMayoristaProduct.type === 'peso' ? formatWeight(viewingMayoristaProduct.stock) : viewingMayoristaProduct.type === 'metro' ? formatLength(viewingMayoristaProduct.stock) : `${viewingMayoristaProduct.stock} und`}</p>
                             </div>
                           </div>
                           <div className="border-t border-slate-200 my-4"></div>
                           <div className="grid grid-cols-2 gap-3">
                             <div className="bg-blue-50 rounded-lg p-3 border border-blue-200">
                               <p className="text-xs font-semibold text-blue-700 uppercase mb-1">VALOR COMPRA</p>
-                              <p className="text-2xl font-bold text-blue-800">{formatCurrency(viewingMayoristaProduct.type === 'peso' ? (viewingMayoristaProduct.purchasePrice ?? viewingMayoristaProduct.purchasePricePerKg ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) / 1000 : (viewingMayoristaProduct.purchasePrice ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock))}</p>
+                              <p className="text-2xl font-bold text-blue-800">{formatCurrency(viewingMayoristaProduct.type === 'peso' ? (viewingMayoristaProduct.purchasePrice ?? viewingMayoristaProduct.purchasePricePerKg ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) / 1000 : viewingMayoristaProduct.type === 'metro' ? (viewingMayoristaProduct.purchasePrice ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) / 100 : (viewingMayoristaProduct.purchasePrice ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock))}</p>
                             </div>
                             <div className="bg-green-50 rounded-lg p-3 border border-green-200">
                               <p className="text-xs font-semibold text-green-700 uppercase mb-1">VALOR VENTA</p>
-                              <p className="text-2xl font-bold text-green-800">{formatCurrency(viewingMayoristaProduct.type === 'peso' ? (viewingMayoristaProduct.salePrice ?? viewingMayoristaProduct.salePricePerKg ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) / 1000 : (viewingMayoristaProduct.salePrice ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock))}</p>
+                              <p className="text-2xl font-bold text-green-800">{formatCurrency(viewingMayoristaProduct.type === 'peso' ? (viewingMayoristaProduct.salePrice ?? viewingMayoristaProduct.salePricePerKg ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) / 1000 : viewingMayoristaProduct.type === 'metro' ? (viewingMayoristaProduct.salePrice ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock) / 100 : (viewingMayoristaProduct.salePrice ?? 0) * (viewingMayoristaProduct.initialStock ?? viewingMayoristaProduct.stock))}</p>
                             </div>
                           </div>
                         </div>
                       </div>
                     ) : (
-                      <div className="space-y-4">
-                        <div className="grid grid-cols-1 gap-6">
-                          {sortedLevels.map((level, idx) => {
-                            const color = colors[idx % colors.length];
-                            const gananciaPorUnidad = (level.salePrice ?? 0) - (level.purchasePrice ?? 0);
-                            const valorCompraTotal = level.initialStock * level.purchasePrice;
-                            const valorVentaTotal = level.initialStock * level.salePrice;
-                            const gananciaNivelTotal = level.initialStock * gananciaPorUnidad;
-
-                            return (
-                              <div key={level.id} className={`bg-white border ${color.border} rounded-xl overflow-hidden shadow-lg`}>
-                                <div className={`${color.headerBg} px-4 py-3 border-b ${color.border}`}>
-                                  <div className="flex justify-between items-center">
-                                    <h4 className="text-lg font-bold text-slate-800">{level.name}</h4>
-                                    <span className="text-xs text-slate-600 bg-white px-2 py-1 rounded border border-slate-200">
-                                      {level.baseUnitsContained} unidades por nivel
-                                    </span>
-                                  </div>
-                                </div>
-                                <div className="p-4 space-y-6">
-                                  <div className="space-y-4">
-                                    <div className="grid grid-cols-2 gap-3 bg-white p-3 rounded-lg border border-slate-200">
-                                      <div className="space-y-1">
-                                        <p className="text-xs font-semibold text-slate-500 uppercase">STOCK INICIAL</p>
-                                        <p className="text-xl font-bold text-slate-900">{level.initialStock}</p>
-                                        <p className="text-[11px] text-slate-400 font-medium">→ {level.initialStock * level.baseUnitsContained} und</p>
-                                      </div>
-                                      <div className="space-y-1">
-                                        <p className="text-xs font-semibold text-slate-500 uppercase">STOCK ACTUAL</p>
-                                        <p className="text-xl font-bold text-blue-600">{level.stock}</p>
-                                        <p className="text-[11px] text-slate-400 font-medium">→ {level.stock * level.baseUnitsContained} und</p>
-                                      </div>
-                                    </div>
-                                    <div className="border-t border-slate-200"></div>
-                                  </div>
-                                  <div className="space-y-4">
-                                    <div className="space-y-3">
-                                      {userRole === 'admin' && (
-                                      <div className="flex justify-between items-center pb-3 border-b border-slate-200">
-                                        <p className="text-xs font-semibold text-slate-500">P. Compra (u)</p>
-                                        <p className="text-lg font-semibold text-slate-800">S/ {(level.purchasePrice ?? 0).toFixed(2)}</p>
-                                      </div>
-                                      )}
-                                      <div className="flex justify-between items-center pb-3 border-b border-slate-200">
-                                        <p className="text-xs font-semibold text-slate-500">P. Venta (u)</p>
-                                        <p className="text-lg font-semibold text-slate-800">S/ {(level.salePrice ?? 0).toFixed(2)}</p>
-                                      </div>
-                                      {userRole === 'admin' && (
-                                      <div className="flex justify-between items-center">
-                                        <p className="text-xs font-semibold text-slate-500">Ganancia (u)</p>
-                                        <p className="text-lg font-semibold text-blue-600">+ S/ {gananciaPorUnidad.toFixed(2)}</p>
-                                      </div>
-                                      )}
-                                    </div>
-                                    <div className="border-t border-slate-200"></div>
-                                  </div>
-                                  <div className="space-y-4">
-                                    <div className="space-y-3">
-                                      {userRole === 'admin' && (
-                                      <div className="flex justify-between items-center pb-3 border-b border-slate-200">
-                                        <p className="text-xs font-semibold text-slate-500 uppercase">VALOR COMPRA</p>
-                                        <p className="text-lg font-semibold text-slate-800">{formatCurrency(valorCompraTotal)}</p>
-                                      </div>
-                                      )}
-                                      {userRole === 'admin' && (
-                                      <div className="flex justify-between items-center">
-                                        <p className="text-xs font-semibold text-slate-500 uppercase">VALOR VENTA</p>
-                                        <p className="text-lg font-semibold text-slate-800">{formatCurrency(valorVentaTotal)}</p>
-                                      </div>
-                                      )}
-                                      <div className="flex justify-between items-center pt-3 border-t border-slate-100">
-                                        <p className="text-xs font-semibold text-slate-500 uppercase">Total Unidades</p>
-                                        <p className="text-lg font-semibold text-slate-700">{level.stock * level.baseUnitsContained} und</p>
-                                      </div>
-                                    </div>
-                                  </div>
-                                  {userRole === 'admin' && (
-                                  <div className={`${color.profitBg} text-white px-4 py-3 rounded-lg flex justify-between items-center`}>
-                                    <p className="text-sm font-semibold uppercase">Ganancia del Nivel</p>
-                                    <p className="text-xl font-bold">{formatCurrency(gananciaNivelTotal)}</p>
-                                  </div>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-
-                        {userRole === 'admin' && (
-                        <div className="mt-6 bg-slate-900 border border-slate-800 text-slate-100 rounded-xl p-5 shadow-lg space-y-4">
-                          <div className="flex items-center gap-2 text-indigo-400">
-                            <TrendingUp className="w-5 h-5 text-indigo-400" />
-                            <h4 className="font-bold text-sm uppercase tracking-wider text-slate-200">Resumen Financiero Total del Stock</h4>
-                          </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-center divide-y sm:divide-y-0 sm:divide-x divide-slate-800">
-                            <div className="pt-4 sm:pt-0">
-                              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Valor Compra Total</p>
-                              <p className="text-2xl font-black text-blue-400 mt-1">
-                                S/ {sortedLevels.reduce((sum, l) => sum + l.initialStock * l.purchasePrice, 0).toFixed(2)}
-                              </p>
-                            </div>
-                            <div className="pt-4 sm:pt-0">
-                              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Valor Venta Total</p>
-                              <p className="text-2xl font-black text-green-400 mt-1">
-                                S/ {sortedLevels.reduce((sum, l) => sum + l.initialStock * l.salePrice, 0).toFixed(2)}
-                              </p>
-                            </div>
-                            <div className="pt-4 sm:pt-0">
-                              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Ganancia Total Proyectada</p>
-                              <p className="text-2xl font-black text-purple-400 mt-1">
-                                S/ {sortedLevels.reduce((sum, l) => sum + l.initialStock * (l.salePrice - l.purchasePrice), 0).toFixed(2)}
-                              </p>
-                            </div>
-                          </div>
-                          </div>
-                        )}
-                      </div>
+                      <InfoProductoNiveles
+                        producto={viewingMayoristaProduct}
+                        userRole={userRole}
+                        tab={infoLevelTab}
+                        onTab={setInfoLevelTab}
+                        onCerrar={() => setIsViewMayoristaProductOpen(false)}
+                      />
                     )}
                   </div>
                 </div>
@@ -8209,8 +10318,8 @@ const Index = () => {
                   );
                 })()}
 
-                {/* Row 3: VENTAS POR RESTOK (only for hasUnidad) */}
-                {userRole === 'admin' && hasUnidad && (() => {
+                {/* Row 3: REGISTRO DE VENTAS POR NIVEL (también para productos sin Unidad) */}
+                {userRole === 'admin' && sortedLevels.length > 0 && (() => {
                   const productId = viewingMayoristaProduct.id;
                   const productHistory = modalProductHistory;
                   const boundaryEvents = productHistory.filter(h => h.type === 'restock' || h.type === 'initial')
@@ -8220,10 +10329,22 @@ const Index = () => {
                   
                   const buildPeriods = () => {
                     const periods = [];
-                    if (boundaryEvents.length === 0) return periods;
-                    for (let i = 0; i < boundaryEvents.length; i++) {
-                      const startDate = boundaryEvents[i].date;
-                      const endDate = i + 1 < boundaryEvents.length ? boundaryEvents[i + 1].date : null;
+                    // Sin contorno "initial"/"restock" en la base (por ejemplo la
+                    // primera venta ocurre antes de que el alta termine de subir)
+                    // se crea un contorno sintético con la fecha de la primera
+                    // venta para que nunca quede oculta.
+                    let contornos = boundaryEvents;
+                    if (contornos.length === 0 && productSales.length > 0) {
+                      const totalVendido = productSales.reduce((t, s) => {
+                        const lvl = viewingMayoristaProduct.saleLevels?.find(l => l.name === s.affectedLevelName);
+                        return t + (s.levelQuantity || 0) * (lvl?.baseUnitsContained || 1);
+                      }, 0);
+                      contornos = [{ ...productSales[0], type: 'initial', quantity: totalVendido } as any];
+                    }
+                    if (contornos.length === 0) return periods;
+                    for (let i = 0; i < contornos.length; i++) {
+                      const startDate = contornos[i].date;
+                      const endDate = i + 1 < contornos.length ? contornos[i + 1].date : null;
                       const periodSales = productSales.filter(s => {
                         const sDate = new Date(s.date);
                         const start = new Date(startDate);
@@ -8235,17 +10356,17 @@ const Index = () => {
                         if (!lvl) return total;
                         return total + (s.levelQuantity || 0) * (lvl.baseUnitsContained || 1);
                       }, 0);
-                      const isPriceChange = boundaryEvents[i].type === 'price_change';
+                      const isPriceChange = contornos[i].type === 'price_change';
                       periods.push({
-                        type: boundaryEvents[i].type,
-                        date: boundaryEvents[i].date,
-                        quantity: isPriceChange ? 0 : boundaryEvents[i].quantity,
+                        type: contornos[i].type,
+                        date: contornos[i].date,
+                        quantity: isPriceChange ? 0 : contornos[i].quantity,
                         unitsSold,
                         remaining: isPriceChange
-                          ? (i > 0 ? periods[i - 1].remaining : (boundaryEvents[i].quantity || 0))
-                          : Math.max(0, (boundaryEvents[i].quantity || 0) - unitsSold),
+                          ? (i > 0 ? periods[i - 1].remaining : (contornos[i].quantity || 0))
+                          : Math.max(0, (contornos[i].quantity || 0) - unitsSold),
                         sales: periodSales,
-                        priceChanges: boundaryEvents[i].priceChanges || []
+                        priceChanges: contornos[i].priceChanges || []
                       });
                     }
                     return periods;
@@ -8271,7 +10392,7 @@ const Index = () => {
                     <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
                       <div className="flex items-center gap-2 text-indigo-600">
                         <FileText className="w-5 h-5" />
-                        <h4 className="font-bold text-sm uppercase tracking-wider">Ventas por Restock</h4>
+                        <h4 className="font-bold text-sm uppercase tracking-wider">Registro de Ventas por Nivel</h4>
                       </div>
                       {(() => {
                         let restockCounter = 0;
@@ -8548,6 +10669,17 @@ const Index = () => {
                   >
                     Peso
                   </Button>
+                  <Button
+                    type="button"
+                    variant={addProductMode === 'metro' ? 'default' : 'outline'}
+                    className="flex-1"
+                    onClick={() => {
+                      setAddProductMode('metro');
+                      limpiarFormularioMetro();
+                    }}
+                  >
+                    Metro
+                  </Button>
                 </div>
               </div>
             )}
@@ -8808,6 +10940,146 @@ const Index = () => {
                     placeholder="especias"
                     value={newWeightProduct.category}
                     onChange={(e) => setNewWeightProduct({...newWeightProduct, category: e.target.value})}
+                  />
+                </div>
+                <div>
+                  <Label>Imagen del producto</Label>
+                  <Input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        setNewProductImage(file);
+                        const reader = new FileReader();
+                        reader.onloadend = () => setNewProductImagePreview(reader.result as string);
+                        reader.readAsDataURL(file);
+                      }
+                    }}
+                  />
+                  {newProductImagePreview && (
+                    <div className="mt-2">
+                      <img src={newProductImagePreview} alt="Preview" className="w-full h-32 object-cover rounded-lg border" />
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {addProductMode === 'metro' && (
+              /* Formulario para productos por metro */
+              <>
+                <div>
+                  <Label htmlFor="metroProductName">Nombre</Label>
+                  <Input
+                    id="metroProductName"
+                    placeholder="Ej: Cable THW 12 AWG"
+                    value={newMetroProduct.name}
+                    onChange={(e) => setNewMetroProduct({...newMetroProduct, name: e.target.value})}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="metroPurchasePrice" className="block min-h-[20px]">Precio de Compra por Metro</Label>
+                    <Input
+                      id="metroPurchasePrice"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={metroPurchaseInput}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        const normalized = raw.replace(',', '.');
+                        if (raw === '' || /^\d*(?:[.,]\d{0,2})?$/.test(raw)) {
+                          setMetroPurchaseInput(raw);
+                          const num = normalized === '' ? 0 : parseFloat(normalized) || 0;
+                          setNewMetroProduct({ ...newMetroProduct, purchasePrice: num });
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const v = e.target.value.replace(',', '.');
+                        if (v !== '' && !isNaN(Number(v))) {
+                          const n = Math.round(parseFloat(v) * 100) / 100;
+                          setNewMetroProduct({ ...newMetroProduct, purchasePrice: n });
+                          setMetroPurchaseInput(n.toFixed(2));
+                        } else {
+                          setMetroPurchaseInput('');
+                        }
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="metroSalePrice" className="block min-h-[20px]">Precio de Venta por Metro</Label>
+                    <Input
+                      id="metroSalePrice"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={metroSaleInput}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        const normalized = raw.replace(',', '.');
+                        if (raw === '' || /^\d*(?:[.,]\d{0,2})?$/.test(raw)) {
+                          setMetroSaleInput(raw);
+                          const num = normalized === '' ? 0 : parseFloat(normalized) || 0;
+                          setNewMetroProduct({ ...newMetroProduct, salePrice: num });
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const v = e.target.value.replace(',', '.');
+                        if (v !== '' && !isNaN(Number(v))) {
+                          const n = Math.round(parseFloat(v) * 100) / 100;
+                          setNewMetroProduct({ ...newMetroProduct, salePrice: n });
+                          setMetroSaleInput(n.toFixed(2));
+                        } else {
+                          setMetroSaleInput('');
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="bg-green-100 p-3 rounded-lg text-center">
+                  <div className="text-sm text-green-700 font-medium">Precio de Venta por Centímetro: S/ {newMetroProduct.salePrice ? (newMetroProduct.salePrice / 100).toFixed(3) : '0.000'}</div>
+                </div>
+                <div>
+                  <Label htmlFor="metroInitialStock">Stock inicial (m)</Label>
+                  <Input
+                    id="metroInitialStock"
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={metroStockInput}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      const normalized = raw.replace(',', '.');
+                      if (raw === '' || /^\d*(?:[.,]\d{0,2})?$/.test(raw)) {
+                        setMetroStockInput(raw);
+                        const num = normalized === '' ? 0 : parseFloat(normalized) || 0;
+                        setNewMetroProduct({ ...newMetroProduct, initialStockCm: Math.round(num * 100) });
+                      }
+                    }}
+                    onBlur={(e) => {
+                      const v = e.target.value.replace(',', '.');
+                      if (v !== '' && !isNaN(Number(v))) {
+                        const n = Math.round(parseFloat(v) * 100) / 100;
+                        setNewMetroProduct({ ...newMetroProduct, initialStockCm: Math.round(n * 100) });
+                        setMetroStockInput(n.toFixed(2));
+                      } else {
+                        setMetroStockInput('');
+                      }
+                    }}
+                  />
+                  <p className="mt-1 text-xs text-slate-500">
+                    Se guarda internamente en centímetros: {formatLength(newMetroProduct.initialStockCm)}.
+                  </p>
+                </div>
+                <div>
+                  <Label htmlFor="metroCategory">Categoría</Label>
+                  <Input
+                    id="metroCategory"
+                    placeholder="Ej: cables"
+                    value={newMetroProduct.category}
+                    onChange={(e) => setNewMetroProduct({...newMetroProduct, category: e.target.value})}
                   />
                 </div>
                 <div>
@@ -9264,12 +11536,14 @@ const Index = () => {
               onClick={() => {
                 if (addProductMode === 'unidad') agregarProducto();
                 else if (addProductMode === 'peso') agregarProductoPeso();
+                else if (addProductMode === 'metro') agregarProductoMetro();
                 else if (addProductMode === 'mayorista') agregarProductoMayorista();
               }}
               className="w-full bg-green-600 hover:bg-green-700 text-white"
               disabled={
                 addProductMode === 'unidad' ? (!newProduct.name || newProduct.salePrice <= 0 || newProduct.purchasePrice <= 0 || newProduct.stock <= 0) :
                 addProductMode === 'peso' ? isWeightFormInvalid :
+                addProductMode === 'metro' ? isMetroFormInvalid :
                 addProductMode === 'mayorista' ? isMayoristaFormInvalid : false
               }
             >
@@ -9289,7 +11563,6 @@ const Index = () => {
             setIsDeleteStockHistoryOpen(false);
             setShowStockRestockForm(false);
             setStockHistoryRestockQuantity('');
-            setClearHistoryPassword('');
             setSelectedMayoristaRestockLevel('');
             setMayoristaRestockQuantity('');
             setSelectedHistoryLevel('');
@@ -9544,12 +11817,10 @@ const Index = () => {
                                 .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
                               if (!selectedHistoryLevel) {
-                                // Vista "Todos" (formato general) - agrupar ventas entre restocks
-                                const filteredHistory = productHistory.filter(item =>
-                                  (item.type !== 'sale' || item.isSummary) && item.type !== 'price_change'
-                                );
+                                // Vista "Todos": libro cronologico con inicial, reposiciones y ventas.
+                                const visibleHistory = productHistory.filter(item => item.type !== 'price_change');
 
-                                if (filteredHistory.length === 0) {
+                                if (visibleHistory.length === 0) {
                                   return (
                                     <TableRow>
                                       <TableCell colSpan={5} className="text-center py-8 text-slate-500">
@@ -9558,6 +11829,13 @@ const Index = () => {
                                     </TableRow>
                                   );
                                 }
+
+                                // Movimiento en unidades generales (mayorista usa unidades_contenidas del nivel).
+                                const movementOf = (item: StockHistoryItem) => {
+                                  if (item.type !== 'sale') return item.quantity;
+                                  const level = currentStockHistoryProduct.saleLevels?.find(l => l.name === item.affectedLevelName);
+                                  return item.quantity * (level?.baseUnitsContained ?? 1);
+                                };
 
                                 const displayRows: Array<{
                                   date: string;
@@ -9569,9 +11847,7 @@ const Index = () => {
                                   key: string;
                                 }> = [];
 
-                                filteredHistory.forEach((item, idx) => {
-                                  if (item.type === 'sale' && item.isSummary) return;
-
+                                visibleHistory.forEach((item) => {
                                   if (item.type === 'initial') {
                                     displayRows.push({
                                       key: item.id,
@@ -9585,14 +11861,26 @@ const Index = () => {
                                     return;
                                   }
 
-                                  const prevItem = idx > 0 ? filteredHistory[idx - 1] : null;
-                                  const matchedSale = prevItem?.type === 'sale' && prevItem.isSummary ? prevItem : null;
+                                  if (item.type === 'sale') {
+                                    return;
+                                  }
+
+                                  const prevSale = visibleHistory
+                                    .filter(h => h.type === 'sale' && h.isSummary)
+                                    .find(h => Math.abs(new Date(h.date).getTime() - new Date(item.date).getTime()) < 5000);
+
+                                  const saleMatch = visibleHistory
+                                    .slice()
+                                    .reverse()
+                                    .find(h => h.type === 'sale' && h.isSummary && new Date(h.date).getTime() < new Date(item.date).getTime());
+
+                                  const saleQty = prevSale?.quantity ?? saleMatch?.quantity;
 
                                   displayRows.push({
                                     key: item.id,
                                     date: item.date,
                                     stockActual: item.resultingStock - item.quantity,
-                                    soldQuantity: matchedSale?.quantity ?? item.levelSoldQuantity ?? null,
+                                    soldQuantity: saleQty ? movementOf({ ...saleQty as any, type: 'sale', affectedLevelName: item.affectedLevelName } as any) : null,
                                     addedQuantity: item.quantity,
                                     resultingStock: item.resultingStock,
                                     isInitial: false
@@ -9625,9 +11913,10 @@ const Index = () => {
                                 ));
                               }
 
-                              // Vista por nivel seleccionado (solo initial y restock, sin ventas individuales)
+                              // Vista por nivel seleccionado (inicial, reposiciones y ventas de ese nivel)
                               const levelEvents = productHistory.filter(item =>
-                                item.type === 'initial' || (item.type === 'restock' && item.affectedLevelName === selectedHistoryLevel)
+                                item.type === 'initial' ||
+                                ((item.type === 'restock' || item.type === 'sale') && item.affectedLevelName === selectedHistoryLevel)
                               );
 
                               if (levelEvents.length === 0) {
@@ -9757,7 +12046,9 @@ const Index = () => {
                             <p className="text-2xl font-black text-slate-900">
                               {currentStockHistoryProduct.type === 'peso'
                                 ? formatWeight(currentStockHistoryProduct.stock)
-                                : currentStockHistoryProduct.stock}
+                                : currentStockHistoryProduct.type === 'metro'
+                                  ? formatLength(currentStockHistoryProduct.stock)
+                                  : currentStockHistoryProduct.stock}
                             </p>
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
@@ -9799,6 +12090,22 @@ const Index = () => {
                             </div>
                           </div>
                         )}
+                        {currentStockHistoryProduct.type === 'metro' && (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                              <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Precio de Venta por Metro</p>
+                              <p className="text-xl font-bold text-green-600">
+                                S/ {(currentStockHistoryProduct.salePrice ?? 0).toFixed(2)}
+                              </p>
+                            </div>
+                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                              <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Precio de Compra por Metro</p>
+                              <p className="text-xl font-bold text-indigo-600">
+                                S/ {(currentStockHistoryProduct.purchasePrice ?? 0).toFixed(2)}
+                              </p>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -9807,19 +12114,29 @@ const Index = () => {
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <div className="space-y-2">
                             <Label htmlFor="stockHistoryRestockQuantity">
-                              {currentStockHistoryProduct.type === 'peso' ? 'Cantidad (gramos)' : currentStockHistoryProduct.type === 'mayorista' ? 'Cantidad (unidades)' : 'Cantidad'}
+                              {currentStockHistoryProduct.type === 'peso'
+                                ? 'Cantidad (gramos)'
+                                : currentStockHistoryProduct.type === 'metro'
+                                  ? 'Cantidad (metros)'
+                                  : currentStockHistoryProduct.type === 'mayorista' ? 'Cantidad (unidades)' : 'Cantidad'}
                             </Label>
                             <Input
                               id="stockHistoryRestockQuantity"
-                              type="number"
-                              min="1"
-                              placeholder="0"
+                              type={currentStockHistoryProduct.type === 'metro' ? 'text' : 'number'}
+                              inputMode={currentStockHistoryProduct.type === 'metro' ? 'decimal' : undefined}
+                              min={currentStockHistoryProduct.type === 'metro' ? undefined : '1'}
+                              placeholder={currentStockHistoryProduct.type === 'metro' ? '0.00' : '0'}
                               value={stockHistoryRestockQuantity}
                               onChange={(e) => setStockHistoryRestockQuantity(e.target.value)}
                             />
                             {currentStockHistoryProduct.type === 'peso' && (
                               <div className="bg-green-100 px-3 py-2 rounded text-sm font-medium text-green-700 w-full text-center">
                                 Conversión<br/>{stockHistoryRestockQuantity ? `${(parseFloat(stockHistoryRestockQuantity) / 1000).toFixed(1)}kg` : '0kg'}
+                              </div>
+                            )}
+                            {currentStockHistoryProduct.type === 'metro' && (
+                              <div className="bg-green-100 px-3 py-2 rounded text-sm font-medium text-green-700 w-full text-center">
+                                Conversión<br/>{stockHistoryRestockQuantity ? formatLength((parseFloat(normalizeDecimalInput(stockHistoryRestockQuantity)) || 0) * 100) : '0.00 m'}
                               </div>
                             )}
                           </div>
@@ -9879,22 +12196,34 @@ const Index = () => {
                                 <TableCell className="text-sm font-bold text-slate-700">
                                   {currentStockHistoryProduct.type === 'peso'
                                     ? formatWeight(item.stockActual)
-                                    : item.stockActual}
+                                    : currentStockHistoryProduct.type === 'metro'
+                                      ? formatLength(item.stockActual)
+                                      : item.stockActual}
                                 </TableCell>
                                 <TableCell className="text-sm font-bold text-red-600">
                                   {item.soldQuantity === null
                                     ? '-'
-                                    : `-${currentStockHistoryProduct.type === 'peso' ? formatWeight(item.soldQuantity) : item.soldQuantity}`}
+                                    : `-${currentStockHistoryProduct.type === 'peso'
+                                      ? formatWeight(item.soldQuantity)
+                                      : currentStockHistoryProduct.type === 'metro'
+                                        ? formatLength(item.soldQuantity)
+                                        : item.soldQuantity}`}
                                 </TableCell>
                                 <TableCell className="text-sm font-bold text-green-600">
-                                  +{currentStockHistoryProduct.type === 'peso'
-                                    ? formatWeight(item.addedQuantity)
-                                    : item.addedQuantity}
+                                  {item.addedQuantity === null
+                                    ? '-'
+                                    : `+${currentStockHistoryProduct.type === 'peso'
+                                      ? formatWeight(item.addedQuantity)
+                                      : currentStockHistoryProduct.type === 'metro'
+                                        ? formatLength(item.addedQuantity)
+                                        : item.addedQuantity}`}
                                 </TableCell>
                                 <TableCell className="text-right text-sm font-bold text-slate-700">
                                   {currentStockHistoryProduct.type === 'peso'
                                     ? formatWeight(item.resultingStock)
-                                    : item.resultingStock}
+                                    : currentStockHistoryProduct.type === 'metro'
+                                      ? formatLength(item.resultingStock)
+                                      : item.resultingStock}
                                   {item.isInitial && <span className="text-slate-500 font-medium"> (inicial)</span>}
                                 </TableCell>
                               </TableRow>
@@ -9915,9 +12244,6 @@ const Index = () => {
         open={isDeleteStockHistoryOpen}
         onOpenChange={(open) => {
           setIsDeleteStockHistoryOpen(open);
-          if (!open) {
-            setClearHistoryPassword('');
-          }
         }}
       >
         <DialogContent className="sm:max-w-md">
@@ -9949,31 +12275,6 @@ const Index = () => {
                 </div>
               </div>
             )}
-            <div className="space-y-2">
-              <Label htmlFor="clearHistoryPassword">Contraseña de administrador</Label>
-              <div className="relative">
-                <Input
-                  id="clearHistoryPassword"
-                  type={showClearHistoryPassword ? 'text' : 'password'}
-                  placeholder="Ingresa la contraseña"
-                  value={clearHistoryPassword}
-                  onChange={(e) => setClearHistoryPassword(e.target.value)}
-                  autoComplete="new-password"
-                  autoFocus
-                  className="pr-10"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-slate-500 hover:text-slate-900"
-                  onClick={() => setShowClearHistoryPassword(prev => !prev)}
-                  tabIndex={-1}
-                >
-                  {showClearHistoryPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </Button>
-              </div>
-            </div>
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
@@ -9983,9 +12284,9 @@ const Index = () => {
             <Button
               variant="destructive"
               onClick={async () => {
-                if (!currentStockHistoryProduct) return;
+              if (!currentStockHistoryProduct) return;
 
-                if (await isValidAdminPassword(clearHistoryPassword, users)) {
+              if (await esAdminActual()) {
                   let updatedProducts;
                   let updatedHistory;
                   let deletedIds: string[] = [];
@@ -10037,7 +12338,6 @@ const Index = () => {
                   safeSetItem('pos-stock-history', JSON.stringify(updatedHistory));
       syncHistoryToFirestore(updatedHistory);
                   setSelectedStockHistoryProduct(resetProduct);
-                  setClearHistoryPassword('');
                   setInventorySearch('');
                   setShowStockRestockForm(false);
                   setStockHistoryRestockQuantity('');
@@ -10064,7 +12364,6 @@ const Index = () => {
         onOpenChange={(open) => {
           setIsDeleteSaleOpen(open);
           if (!open) {
-            setDeleteSalePassword('');
             setSaleToDelete(null);
           }
         }}
@@ -10073,35 +12372,9 @@ const Index = () => {
           <DialogHeader>
             <DialogTitle>Eliminar venta</DialogTitle>
             <DialogDescription>
-              Se eliminará la venta ID: {saleToDelete?.id}.
+              ¿Estás seguro de que deseas eliminar el Ticket #{saleToDelete ? ticketNumberOf(saleToDelete.id) : ''}? Esta acción no se puede deshacer.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <div className="space-y-2">
-              <Label>Contraseña de administrador</Label>
-              <div className="relative">
-                <Input
-                  type={showDeleteSalePassword ? 'text' : 'password'}
-                  placeholder="Ingresa la contraseña"
-                  value={deleteSalePassword}
-                  onChange={(e) => setDeleteSalePassword(e.target.value)}
-                  autoComplete="new-password"
-                  autoFocus
-                  className="pr-10"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-slate-500 hover:text-slate-900"
-                  onClick={() => setShowDeleteSalePassword(prev => !prev)}
-                  tabIndex={-1}
-                >
-                  {showDeleteSalePassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </Button>
-              </div>
-            </div>
-          </div>
           <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="outline" onClick={() => setIsDeleteSaleOpen(false)}>
               Cancelar
@@ -10109,21 +12382,27 @@ const Index = () => {
             <Button
               variant="destructive"
               onClick={async () => {
-                if (!saleToDelete) return;
+              if (!saleToDelete) return;
 
-                if (await isValidAdminPassword(deleteSalePassword, users)) {
+              if (await esAdminActual()) {
                   try { await deleteSale(saleToDelete.id); } catch (e) { console.error('ERROR deleteSale:', e); }
                   removePendingId(PENDING.SALES, saleToDelete.id);
                   const updatedSales = sales.filter(s => s.id !== saleToDelete.id);
                   setSales(updatedSales);
                   safeSetItem('pos-sales', JSON.stringify(updatedSales));
+                  try {
+                    const lista = JSON.parse(localStorage.getItem('pos-sales') || '[]');
+                    if (Array.isArray(lista)) {
+                      const limpia = lista.filter((x: any) => x?.id !== saleToDelete.id);
+                      safeSetItem('pos-sales', JSON.stringify(limpia));
+                    }
+                  } catch {}
                   syncSalesToFirestore(updatedSales);
                   toast({
                     title: "Venta eliminada",
-                    description: `Venta ID: ${saleToDelete.id} eliminada.`,
+                    description: `Venta #${ticketNumberOf(saleToDelete.id)} eliminada.`,
                   });
                   setIsDeleteSaleOpen(false);
-                  setDeleteSalePassword('');
                   setSaleToDelete(null);
                 } else {
                   toast({
@@ -10146,7 +12425,6 @@ const Index = () => {
           setIsDeleteProductConfirmOpen(open);
           if (!open) {
             setProductToDelete(null);
-            setDeleteProductPassword('');
           }
         }}
       >
@@ -10154,40 +12432,13 @@ const Index = () => {
           <DialogHeader>
             <DialogTitle>Eliminar producto</DialogTitle>
             <DialogDescription>
-              Se eliminará el producto: {productToDelete?.name}.
+              Se eliminará el producto: {productToDelete?.name}. Esta acción no se puede deshacer.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <div className="space-y-2">
-              <Label>Contraseña de administrador</Label>
-              <div className="relative">
-                <Input
-                  type={showDeleteProductPassword ? 'text' : 'password'}
-                  placeholder="Ingresa la contraseña"
-                  value={deleteProductPassword}
-                  onChange={(e) => setDeleteProductPassword(e.target.value)}
-                  autoComplete="new-password"
-                  autoFocus
-                  className="pr-10"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-slate-500 hover:text-slate-900"
-                  onClick={() => setShowDeleteProductPassword(prev => !prev)}
-                  tabIndex={-1}
-                >
-                  {showDeleteProductPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </Button>
-              </div>
-            </div>
-          </div>
           <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="outline" onClick={() => {
               setIsDeleteProductConfirmOpen(false);
               setProductToDelete(null);
-              setDeleteProductPassword('');
             }}>
               Cancelar
             </Button>
@@ -10201,7 +12452,7 @@ const Index = () => {
       <Dialog open={isBoletaPreviewOpen} onOpenChange={setIsBoletaPreviewOpen}>
         <DialogContent className="max-w-2xl" style={{ maxHeight: 'none' }}>
           <DialogHeader>
-            <DialogTitle className="text-center">Vista previa de Boleta</DialogTitle>
+            <DialogTitle className="text-center">Vista previa de Ticket de Compra</DialogTitle>
           </DialogHeader>
           {selectedBoletaSale && (
             <div className="space-y-4">
@@ -10226,7 +12477,7 @@ const Index = () => {
                     setIsBoletaPreviewOpen(false);
                   }}
                 >
-                  <span className="mr-2">🖨</span> Imprimir
+                  <Printer className="w-4 h-4 mr-2" /> Imprimir
                 </Button>
               </div>
             </div>
@@ -10234,238 +12485,249 @@ const Index = () => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isConfigOpen} onOpenChange={setIsConfigOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog open={isComprobantePreviewOpen} onOpenChange={setIsComprobantePreviewOpen}>
+        <DialogContent className="w-[min(230mm,96vw)] max-w-none" style={{ maxHeight: '90vh' }}>
           <DialogHeader>
-            <DialogTitle>Configuración de Impresión</DialogTitle>
-            <DialogDescription>
-              Configura la impresión directa con QZ Tray para tiqueteras térmicas.
-            </DialogDescription>
+            <DialogTitle className="text-center">Comprobante {comprobantePreviewNumero}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-5 py-2">
-            <div className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border">
-              <div className="flex items-center gap-3">
-                <div className={`w-3 h-3 rounded-full ${qzConnected ? 'bg-green-500 shadow-sm shadow-green-200' : 'bg-slate-300'}`} />
-                <div>
-                  <p className="text-sm font-medium text-slate-900">QZ Tray</p>
-                  <p className="text-xs text-slate-500">{qzConnected ? 'Conectado' : 'No conectado'}</p>
-                </div>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="text-xs"
-                onClick={probarQZTray}
-                disabled={isQzTesting}
-              >
-                {isQzTesting ? 'Probando...' : 'Probar Conexión'}
-              </Button>
-            </div>
-
-            {qzConnected && qzPrinters.length > 0 && (
-              <div className="space-y-2">
-                <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">
-                  Impresora
-                </Label>
-                <Select value={selectedQzPrinter} onValueChange={setSelectedQzPrinter}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Selecciona una impresora" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {qzPrinters.map((printer) => (
-                      <SelectItem key={printer} value={printer}>{printer}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
-            <Separator />
-
-            <div className="space-y-3">
-              <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">
-                Logo de la Empresa
-              </Label>
-              {companyLogo && (
-                <div className="flex justify-center mb-2">
-                  <img
-                    src={companyLogo}
-                    alt="Logo"
-                    className="h-16 object-contain rounded-lg border border-slate-200 p-1"
-                  />
-                </div>
-              )}
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-xs flex-1"
-                  onClick={() => {
-                    const input = document.createElement('input');
-                    input.type = 'file';
-                    input.accept = 'image/png,image/jpeg,image/jpg';
-                    input.onchange = (e) => {
-                      const file = (e.target as HTMLInputElement).files?.[0];
-                      if (file) {
-                        const img = new Image();
-                        img.onload = () => {
-                          const canvas = document.createElement('canvas');
-                          const MAX = 300;
-                          let w = img.width, h = img.height;
-                          if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
-                          canvas.width = w; canvas.height = h;
-                          canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
-                          const resized = canvas.toDataURL('image/jpeg', 0.8);
-                          setCompanyLogo(resized);
-                          safeSetItem('pos-company-logo', resized);
-                          toast({ title: "Logo actualizado", description: "El logo se guardó correctamente" });
-                        };
-                        img.src = URL.createObjectURL(file);
-                      }
-                    };
-                    input.click();
-                  }}
-                >
-                  {companyLogo ? 'Cambiar Logo' : 'Subir Logo'}
-                </Button>
-                {companyLogo && (
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    className="text-xs"
-                    onClick={() => {
-                      setCompanyLogo('');
-                      try { localStorage.removeItem('pos-company-logo'); } catch {}
-                      toast({ title: "Logo eliminado", description: "El logo se ha removido" });
-                    }}
-                  >
-                    Quitar
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            <Separator />
-
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label className="text-sm font-medium">Impresión directa</Label>
-                <p className="text-xs text-slate-500">
-                  {useQzPrint
-                    ? 'Al vender imprimirá directo sin diálogo de Chrome'
-                    : 'Usa el diálogo de impresión del navegador'}
-                </p>
-              </div>
-              <Button
-                variant={useQzPrint ? "default" : "outline"}
-                size="sm"
-                className={useQzPrint ? "bg-indigo-600 hover:bg-indigo-700" : ""}
-                onClick={() => setUseQzPrint(!useQzPrint)}
-                disabled={!qzConnected}
-              >
-                {useQzPrint ? 'Activado' : 'Desactivado'}
-              </Button>
-            </div>
-
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
-              <div className="flex gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-xs font-medium text-amber-800">¿No ves tu impresora?</p>
-                  <ul className="text-[11px] text-amber-700 mt-1 space-y-0.5 list-disc list-inside">
-                    <li>Descarga e instala QZ Tray desde qz.io</li>
-                    <li>Verifica que QZ Tray esté ejecutándose</li>
-                    <li>Haz clic en "Probar Conexión"</li>
-                  </ul>
-                </div>
-              </div>
-            </div>
-
-            <Separator />
-
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-slate-700">
-                <CloudUpload className="w-4 h-4 text-indigo-600" />
-                <span className="font-semibold text-sm">Sincronización en la Nube</span>
-              </div>
-              <p className="text-xs text-slate-500">
-                Sube todos tus datos locales (productos, ventas, historial, usuarios) a Firebase Firestore para acceder desde cualquier dispositivo.
-              </p>
-              <Button
-                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white"
-                onClick={async () => {
-                  const safeJSON = <T,>(key: string, fallback: T[]): T[] => {
-                    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
-                  };
-                  // Leer datos locales (de state o localStorage)
-                  const localProducts = products.length > 0 ? products : safeJSON('pos-products', []);
-                  const localSales = sales.length > 0 ? sales : safeJSON('pos-sales', []);
-                  const localUsers = users.length > 0 ? users : safeJSON('pos-users', []);
-                  const localCloses = dailyCloses.length > 0 ? dailyCloses : safeJSON('pos-daily-closes', []);
-                  const localHistory = stockHistory.length > 0 ? stockHistory : safeJSON('pos-stock-history', []);
-                  
-                  // Sync individual por colección: solo empuja lo que no está en Firebase
-                  const pushMissing = async <T,>(
-                    items: T[],
-                    pendingKey: string,
-                    getAll: () => Promise<T[]>,
-                    create: (id: string, data: T) => Promise<void>,
-                    update?: (id: string, data: Partial<T>) => Promise<void>
-                  ) => {
-                    const fbItems = await getAll().catch(() => null);
-                    if (!fbItems) return;
-                    const fbIds = new Set(fbItems.map((x: any) => x.id));
-                    for (const item of items) {
-                      const id = (item as any).id;
-                      if (fbIds.has(id)) {
-                        if (isPendingId(pendingKey, id) && update) {
-                          try { await update(id, stripUndefined(item)); removePendingId(pendingKey, id); } catch (e) { console.error('ERROR pushMissing update:', e); }
-                        } else {
-                          removePendingId(pendingKey, id);
-                        }
-                      } else {
-                        try { await create(id, stripUndefined(item)); removePendingId(pendingKey, id); } catch (e) { console.error('ERROR pushMissing create:', e); }
-                      }
-                    }
-                  };
-                  
-                  await Promise.all([
-                    pushMissing(localProducts, PENDING.PRODUCTS, getAllProducts, createProduct, updateProduct),
-                    pushMissing(localSales, PENDING.SALES, getAllSales, createSale),
-                    pushMissing(localUsers, PENDING.USERS, getAllLocalUsers, createLocalUser, updateLocalUser),
-                    pushMissing(localCloses, PENDING.CLOSES, getAllDailyCloses, createDailyClose),
-                    pushMissing(localHistory, PENDING.HISTORY, getAllStockHistory, createStockHistoryItem),
-                  ]);
-                  
-                  toast({ title: "Datos sincronizados", description: "Todos los datos locales se subieron a la nube exitosamente." });
-                  setIsConfigOpen(false);
-                }}
-              >
-                <CloudUpload className="w-4 h-4 mr-2" />
-                Subir a la nube
-              </Button>
-              <Button
-                variant="outline"
-                className="w-full border-slate-300 text-slate-700 hover:bg-slate-100 mt-2"
-                onClick={handleForceSync}
-              >
-                <RefreshCw className="w-4 h-4 mr-2" />
-                Descargar desde la base de datos
-              </Button>
-            </div>
+          <div className="bg-white border rounded-lg overflow-auto" style={{ maxHeight: '72vh' }}>
+            <div className="p-2 sm:p-3" dangerouslySetInnerHTML={{ __html: comprobantePreviewHTML }} style={{ width: '100%', minWidth: 0 }} />
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsConfigOpen(false)} className="w-full">
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={() => setIsComprobantePreviewOpen(false)}
+            >
               Cerrar
             </Button>
-          </DialogFooter>
+            <Button
+              className="flex-1 bg-indigo-600 hover:bg-indigo-700"
+              disabled={!comprobantePreviewHTML}
+              onClick={() => imprimirHTML(comprobantePreviewHTML)}
+            >
+              <Printer className="w-4 h-4 mr-2" /> Imprimir / Descargar PDF
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isConfigOpen} onOpenChange={setIsConfigOpen}>
+        <DialogContent className="max-w-4xl max-h-[92vh] p-0 overflow-hidden [&>button]:hidden">
+          <div className="flex flex-col h-full">
+            <header className="flex items-center justify-between px-6 py-5 sm:px-8 border-b border-slate-100 bg-white">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-blue-50 text-blue-600 border border-blue-100">
+                  <Settings className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold tracking-tight text-slate-900">Configuración del Sistema</h2>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsConfigOpen(false)}
+                aria-label="Cerrar modal"
+                className="group p-2 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </header>
+            <main className="flex-1 overflow-y-auto px-6 py-6 sm:px-8 space-y-4 bg-slate-50/60">
+              <article className="bg-white rounded-2xl border border-slate-200/90 shadow-sm overflow-hidden">
+                <details className="group">
+                  <summary className="w-full flex items-center justify-between px-5 sm:px-6 py-4 bg-slate-50/50 hover:bg-slate-50/90 cursor-pointer">
+                    <div className="flex items-center gap-3.5">
+                      <div className="w-9 h-9 rounded-xl bg-blue-100/70 text-blue-700 flex items-center justify-center">
+                        <Building2 className="w-5 h-5" />
+                      </div>
+                      <h3 className="text-sm sm:text-base font-semibold text-slate-900 tracking-wide uppercase">DATOS FISCALES (EMISOR)</h3>
+                    </div>
+                    <ChevronDown className="w-5 h-5 text-slate-400 group-open:rotate-180 transition-transform" />
+                  </summary>
+                  <div className="px-5 sm:px-6 py-5 border-t border-slate-100">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Número de RUC</Label>
+                        <Input value={emisorForm.ruc} onChange={(e) => setEmisorForm(prev => ({ ...prev, ruc: e.target.value }))} className="rounded-xl" placeholder="20XXXXXXXXX" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Razón Social</Label>
+                        <Input value={emisorForm.razonSocial} onChange={(e) => setEmisorForm(prev => ({ ...prev, razonSocial: e.target.value }))} className="rounded-xl" />
+                      </div>
+                      <div className="space-y-1.5 sm:col-span-2">
+                        <Label className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Descripción</Label>
+                        <Input value={emisorForm.nombreComercial} onChange={(e) => setEmisorForm(prev => ({ ...prev, nombreComercial: e.target.value }))} className="rounded-xl w-full" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Dirección Fiscal</Label>
+                        <Input value={emisorForm.direccion} onChange={(e) => setEmisorForm(prev => ({ ...prev, direccion: e.target.value }))} className="rounded-xl" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Teléfono</Label>
+                        <Input value={emisorForm.telefono} onChange={(e) => setEmisorForm(prev => ({ ...prev, telefono: e.target.value }))} className="rounded-xl" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Correo Electrónico</Label>
+                        <Input type="email" value={emisorForm.email} onChange={(e) => setEmisorForm(prev => ({ ...prev, email: e.target.value }))} className="rounded-xl" />
+                      </div>
+                    </div>
+                    <div className="flex justify-end mt-4">
+                      <Button className="bg-blue-600 hover:bg-blue-700 text-white" disabled={isSavingEmisor} onClick={guardarEmisor}>
+                        <Building2 className="w-4 h-4 mr-2" />
+                        {isSavingEmisor ? 'Guardando…' : 'Guardar Datos Fiscales'}
+                      </Button>
+                    </div>
+                  </div>
+                </details>
+              </article>
+
+              <article className="bg-white rounded-2xl border border-slate-200/90 shadow-sm overflow-hidden">
+                <details className="group">
+                  <summary className="w-full flex items-center justify-between px-5 sm:px-6 py-4 bg-slate-50/50 hover:bg-slate-50/90 cursor-pointer">
+                    <div className="flex items-center gap-3.5">
+                      <div className="w-9 h-9 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
+                        <ImageIcon className="w-5 h-5" />
+                      </div>
+                      <h3 className="text-sm sm:text-base font-semibold text-slate-900 tracking-wide uppercase">LOGO DE LA EMPRESA</h3>
+                    </div>
+                    <ChevronDown className="w-5 h-5 text-slate-400 group-open:rotate-180 transition-transform" />
+                  </summary>
+                  <div className="px-5 sm:px-6 py-4 border-t border-slate-100">
+                    <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-3 bg-slate-50 rounded-xl border border-slate-200">
+                      <div className="flex items-center gap-4">
+                        <div className="w-36 h-14 bg-white border border-slate-200 rounded-lg flex items-center justify-center">
+                          {companyLogo ? <img src={companyLogo} alt="Logo" className="max-w-full max-h-full object-contain" /> : <span className="text-xs text-slate-400">Sin logo</span>}
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold text-slate-800">{companyLogo ? 'Logo configurado' : 'Sin logo'}</p>
+                          <p className="text-[11px] text-slate-500">Dimensiones óptimas: 240x80px • PNG/JPG</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button variant="outline" size="sm" onClick={() => {
+                          const input = document.createElement('input');
+                          input.type = 'file';
+                          input.accept = 'image/png,image/jpeg,image/jpg';
+                          input.onchange = (e) => {
+                            const file = (e.target as HTMLInputElement).files?.[0];
+                            if (file) {
+                              const img = new Image();
+                              img.onload = () => {
+                                const canvas = document.createElement('canvas');
+                                const MAX = 300;
+                                let w = img.width, h = img.height;
+                                if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
+                                canvas.width = w; canvas.height = h;
+                                canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
+                                const resized = canvas.toDataURL('image/jpeg', 0.8);
+                                setCompanyLogo(resized);
+                                safeSetItem('pos-company-logo', resized);
+                                toast({ title: "Logo actualizado" });
+                              };
+                              img.src = URL.createObjectURL(file);
+                            }
+                          };
+                          input.click();
+                        }}>Cambiar Logo</Button>
+                        {companyLogo && <Button variant="outline" size="sm" className="text-rose-600 border-rose-200 hover:bg-rose-50" onClick={() => { setCompanyLogo(''); try { localStorage.removeItem('pos-company-logo'); } catch {} toast({ title: "Logo eliminado" }); }}>Quitar</Button>}
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              </article>
+
+              <article className="bg-white rounded-2xl border border-slate-200/90 shadow-sm overflow-hidden">
+                <details className="group">
+                  <summary className="w-full flex items-center justify-between px-5 sm:px-6 py-4 bg-slate-50/50 hover:bg-slate-50/90 cursor-pointer">
+                    <div className="flex items-center gap-3.5">
+                      <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center">
+                        <Printer className="w-5 h-5" />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-sm sm:text-base font-semibold text-slate-900 tracking-wide uppercase">CONFIGURACIÓN DE IMPRESIÓN</h3>
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium ${qzConnected ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full mr-1.5 ${qzConnected ? 'bg-emerald-500' : 'bg-red-500'}`}></span>
+                          {qzConnected ? 'QZ Tray Conectado' : 'QZ Tray Sin Conexión'}
+                        </span>
+                      </div>
+                    </div>
+                    <ChevronDown className="w-5 h-5 text-slate-400 group-open:rotate-180 transition-transform" />
+                  </summary>
+                  <div className="px-5 sm:px-6 py-4 border-t border-slate-100 space-y-4">
+                    <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
+                      <div>
+                        <p className="text-sm font-medium">Impresión directa</p>
+                        <p className="text-xs text-slate-500">Usa el diálogo de impresión del navegador</p>
+                      </div>
+                      <Button variant={useQzPrint ? "default" : "outline"} size="sm" className={useQzPrint ? "bg-indigo-600 hover:bg-indigo-700" : ""} onClick={() => setUseQzPrint(!useQzPrint)} disabled={!qzConnected}>
+                        {useQzPrint ? 'Activado' : 'Desactivado'}
+                      </Button>
+                    </div>
+                    <div className="space-y-3">
+                      <p className="text-sm font-medium">QZ Tray (Impresión directa a impresora térmica)</p>
+                      <div className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-3 h-3 rounded-full ${qzConnected ? 'bg-green-500' : 'bg-slate-300'}`} />
+                          <p className="text-sm">Estado: {qzConnected ? 'Conectado' : 'Sin conexión'}</p>
+                        </div>
+                        <Button size="sm" variant="outline" onClick={probarQZTray} disabled={isQzTesting}>
+                          {isQzTesting ? 'Probando...' : 'Probar Conexión'}
+                        </Button>
+                      </div>
+                      {qzConnected && qzPrinters.length > 0 && (
+                        <div className="space-y-2">
+                          <Label>Impresora</Label>
+                          <Select value={selectedQzPrinter} onValueChange={setSelectedQzPrinter}>
+                            <SelectTrigger className="rounded-xl"><SelectValue placeholder="Seleccionar impresora" /></SelectTrigger>
+                            <SelectContent>
+                              {qzPrinters.map((printer) => (<SelectItem key={printer} value={printer}>{printer}</SelectItem>))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                        <p className="text-xs font-medium text-amber-800 mb-1">¿No ves tu impresora?</p>
+                        <ul className="text-[11px] text-amber-700 space-y-0.5 list-disc list-inside">
+                          <li>Descarga e instala QZ Tray desde qz.io</li>
+                          <li>Verifica que QZ Tray esté ejecutándose</li>
+                          <li>Haz clic en "Probar Conexión"</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              </article>
+
+              <article className="bg-white rounded-2xl border border-slate-200/90 shadow-sm overflow-hidden">
+                <details className="group">
+                  <summary className="w-full flex items-center justify-between px-5 sm:px-6 py-4 bg-slate-50/50 hover:bg-slate-50/90 cursor-pointer">
+                    <div className="flex items-center gap-3.5">
+                      <div className="w-9 h-9 rounded-xl bg-cyan-100 text-cyan-700 flex items-center justify-center">
+                        <CloudUpload className="w-5 h-5" />
+                      </div>
+                      <h3 className="text-sm sm:text-base font-semibold text-slate-900 tracking-wide uppercase">SINCRONIZACIÓN EN LA NUBE</h3>
+                    </div>
+                    <ChevronDown className="w-5 h-5 text-slate-400 group-open:rotate-180 transition-transform" />
+                  </summary>
+                  <div className="px-5 sm:px-6 py-4 border-t border-slate-100">
+                    <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                      <p className="text-xs text-slate-600">Sincronizar datos con la base de datos</p>
+                      <Button variant="outline" size="sm" onClick={handleForceSync}>
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        Descargar desde la base de datos
+                      </Button>
+                    </div>
+                  </div>
+                </details>
+              </article>
+            </main>
+          </div>
         </DialogContent>
       </Dialog>
 
       <Dialog open={isClearSalesOpen} onOpenChange={(open) => {
         setIsClearSalesOpen(open);
-        if (!open) { setClearSalesPassword(''); }
-      }}>
+              }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
@@ -10479,34 +12741,8 @@ const Index = () => {
               Esta acción no se puede deshacer.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <div className="space-y-2">
-              <Label>Contraseña de administrador</Label>
-              <div className="relative">
-                <Input
-                  type={showClearSalesPassword ? 'text' : 'password'}
-                  placeholder="Ingresa la contraseña"
-                  value={clearSalesPassword}
-                  onChange={(e) => setClearSalesPassword(e.target.value)}
-                  autoComplete="new-password"
-                  autoFocus
-                  className="pr-10"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-slate-500 hover:text-slate-900"
-                  onClick={() => setShowClearSalesPassword(prev => !prev)}
-                  tabIndex={-1}
-                >
-                  {showClearSalesPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </Button>
-              </div>
-            </div>
-          </div>
           <DialogFooter className="gap-2 sm:gap-0">
-            <Button variant="outline" onClick={() => { setIsClearSalesOpen(false); setClearSalesPassword(''); }}>
+            <Button variant="outline" onClick={() => setIsClearSalesOpen(false)}>
               Cancelar
             </Button>
             <Button variant="destructive" onClick={confirmClearTodaySales}>
@@ -10521,18 +12757,18 @@ const Index = () => {
           <DialogHeader>
             <DialogTitle>
               <div className="flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-rose-600" />
-                Stock Crítico
+                <AlertTriangle className="w-5 h-5 text-amber-600" />
+                Stock Bajo Mayorista
               </div>
             </DialogTitle>
             <DialogDescription>
-              Productos con niveles de stock agotado o por debajo del umbral ({STOCK_BAJO_THRESHOLD} unidades).
+              Niveles de productos mayoristas con stock agotado o por debajo del umbral ({STOCK_BAJO_THRESHOLD} unidades).
             </DialogDescription>
           </DialogHeader>
           <ScrollArea className="max-h-[60vh]">
             {stockCriticoLevels.length === 0 ? (
               <div className="py-8 text-center text-slate-500">
-                No hay productos con stock crítico.
+                No hay productos mayoristas con stock bajo.
               </div>
             ) : (
               <Table>
